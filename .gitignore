@@ -1,0 +1,16 @@
+node_modules/
+.venv/
+.env
+.env.*
+!.env.example
+*.sqlite*
+*.lock
+!package-lock.json
+*cookie*.json
+*session*.json
+*.tgz
+__pycache__/
+.runtime/
+.api-private/
+.protocol-private/
+evidence/
