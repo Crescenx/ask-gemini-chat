@@ -34,7 +34,7 @@ try {
       return value;
     };
     let result = record.run_id ? await call('get_gemini_result', {run_id: record.run_id, wait_ms: 0}) :
-      await call('ask_gemini_chat', {request_id: record.request_id, prompt: record.prompt, wait_ms: 0});
+      await call('ask_gemini_chat', {request_id: record.request_id, prompt: record.prompt, mode: 'normal', wait_ms: 0});
     record.run_id = result.run_id; await save();
     const deadline = Date.now() + GENERATION_WAIT_MS;
     while (['running', 'uncertain'].includes(result.status) && Date.now() < deadline) {

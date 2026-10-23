@@ -31,11 +31,17 @@ export function generation(raw){
   for(const frame of frames(raw)){
     if(frame[0]!=='wrb.fr'||typeof frame[2]!=='string')continue;
     const body=JSON.parse(frame[2]);
-    if(body?.[1]?.[0])result.metadata=[...body[1].slice(0,2),result.metadata?.[2]??''];
+    if(body?.[1]?.[0]){
+      if(result.metadata&&(body[1][0]!==result.metadata[0]||body[1][1]!==result.metadata[1]))result={text:'',metadata:null,complete:false};
+      result.metadata=[...body[1].slice(0,2),result.metadata?.[2]??''];
+    }
     const candidate=body?.[4]?.[0];
-    if(candidate?.[1]?.[0])result.text=candidate[1][0];
-    if(candidate?.[0]&&result.metadata)result.metadata=[...result.metadata.slice(0,2),candidate[0]];
-    if(candidate?.[8]?.[0]===2)result.complete=true;
+    if(candidate){
+      if(candidate[0]&&candidate[0]!==result.metadata?.[2])result.text='';
+      if(typeof candidate[1]?.[0]==='string')result.text=candidate[1][0];
+      if(candidate[0]&&result.metadata)result.metadata=[...result.metadata.slice(0,2),candidate[0]];
+      result.complete=candidate[8]?.[0]===2;
+    }
   }
   return result;
 }

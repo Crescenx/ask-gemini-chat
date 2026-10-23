@@ -73,3 +73,20 @@ test('history retries one transient read failure; mutating RPCs never retry',asy
   calls=0;
   await assert.rejects(api.rpc('KDNZr',['c_abc','r_abc']),/HTTP_TRANSPORT_ERROR/);assert.equal(calls,1);
 });
+
+test('temporary mode changes only its wire flag and participates in request deduplication',async()=>{
+  const bodies=[];
+  const api=new WebAPI({auth,fetchImpl:async(_url,options)=>{
+    bodies.push(JSON.parse(JSON.parse(options.body.get('f.req'))[1]));
+    return new Response(frame);
+  }});
+  const files=[[['/contrib_service/test',3,null,'text/plain'],'note.txt']];
+  await api.start({id:'normal',prompt:'question',files});await done(api,'normal');
+  const input={id:'temporary',prompt:'question',files,temporary:true};
+  await api.start(input);await done(api,input.id);await api.start(input);
+  assert.equal(bodies.length,2);assert.equal(bodies[0][45],null);assert.equal(bodies[1][45],1);
+  bodies[1][45]=null;bodies[1][59]='normal';assert.deepEqual(bodies[1],bodies[0]);
+  await assert.rejects(api.start({...input,temporary:false}),/REQUEST_ID_CONFLICT/);
+  await assert.rejects(api.start({...input,id:'invalid',temporary:'yes'}),/INVALID_CHAT_MODE/);
+  assert.equal(bodies.length,2);
+});

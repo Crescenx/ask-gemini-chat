@@ -69,6 +69,61 @@ test('lost transport after upstream completion recovers exact observed turn with
   assert(x.service.events(run.id, 0).some(e => e.type === 'run.completed'));
 });
 
+test('temporary saved results and context survive restart without upstream history', async t => {
+  const x = await setup(t);
+  x.backend.history = async () => { assert.fail('no upstream history for temporary chats'); };
+  x.backend.recover = async () => { assert.fail('no upstream recovery for temporary chats'); };
+  const chat = await x.service.createChat({ model: 'argon', temporary: true }, 'create-temp');
+  const first = await x.service.send(chat.id, { text: 'remember' }, 'first', chat.revision);
+  await until(() => x.service.getRun(first.id).status === 'completed');
+  const position = x.service.getRun(first.id).turn!.position;
+  x.restart();
+  assert.equal(x.service.getChat(chat.id).temporary, true);
+  assert.equal((await x.service.refresh(first.id)).turn?.output.text, 'reply:remember');
+  assert.equal((await x.service.send(chat.id, { text: 'remember' }, 'first', 0)).id, first.id);
+  const revision = x.service.getChat(chat.id).revision;
+  const second = await x.service.send(chat.id, { text: 'recall' }, 'second', revision);
+  await until(() => x.service.getRun(second.id).status === 'completed');
+  assert.deepEqual(x.backend.generations[1].parent, position);
+  assert.equal(x.backend.generations[1].temporary, true);
+  const page = await x.service.history(chat.id, undefined, 1);
+  assert.equal(page.turns[0].input.text, 'remember');
+  assert.equal((await x.service.history(chat.id, page.nextCursor!, 1)).turns[0].input.text, 'recall');
+  const head = x.service.getChat(chat.id).head!, current = x.service.getChat(chat.id).revision;
+  await assert.rejects(x.service.fork(chat.id, { at: head }, 'fork-temp', current), { code: 'CAPABILITY_UNAVAILABLE' });
+  await assert.rejects(x.service.fork(chat.id, { mode: 'in-place', at: head, input: { text: 'edit' } }, 'edit-temp', current), { code: 'CAPABILITY_UNAVAILABLE' });
+  await assert.rejects(x.service.regenerate(chat.id, head, 'regen-temp', current), { code: 'CAPABILITY_UNAVAILABLE' });
+  await assert.rejects(x.service.select(chat.id, head, 'select-temp', current), { code: 'CAPABILITY_UNAVAILABLE' });
+  assert.equal(x.backend.generations.length, 2); assert.equal(x.backend.forks, 0);
+});
+
+test('interrupted temporary requests stay uncertain across restart and are never recovered or resent', async t => {
+  const x = await setup(t);
+  x.backend.recover = async () => { assert.fail('temporary recovery must not run'); };
+  let release!: () => void;
+  x.backend.gate = new Promise<void>(r => { release = r; });
+  const chat = await x.service.createChat({ model: 'argon', temporary: true }, 'temp-create');
+  const run = await x.service.send(chat.id, { text: 'unknown' }, 'temp-send', chat.revision);
+  await until(() => x.backend.generations.length === 1);
+  x.restart();
+  const interrupted = await x.service.refresh(run.id);
+  assert.equal(interrupted.status, 'uncertain');
+  assert.equal(interrupted.error?.code, 'TEMPORARY_RESULT_UNRECOVERABLE');
+  assert.equal((await x.service.send(chat.id, { text: 'unknown' }, 'temp-send', 0)).id, run.id);
+  await assert.rejects(x.service.send(chat.id, { text: 'next' }, 'temp-next', x.service.getChat(chat.id).revision), { code: 'CHAT_BUSY' });
+  release(); await new Promise(r => setTimeout(r, 20));
+  assert.equal((await x.service.refresh(run.id)).status, 'uncertain');
+  assert.equal(x.backend.generations.length, 1);
+});
+
+test('explicit normal mode preserves existing creation idempotency signatures', async t => {
+  const x = await setup(t);
+  const original = await x.service.createChat({ model: 'argon' }, 'existing-create');
+  x.restart();
+  assert.equal((await x.service.createChat({ model: 'argon', temporary: false }, 'existing-create')).id, original.id);
+  await assert.rejects(x.service.createChat({ model: 'argon', temporary: true }, 'existing-create'), { code: 'IDEMPOTENCY_CONFLICT' });
+});
+
 test('fork at interior reply copies prefix to new cid; in-place replacement retains files and cuts descendants', async t => {
   const x = await setup(t);
   const cid = 'c_abcd';

@@ -21,6 +21,7 @@ function validate<T>(schema: z.ZodType<T>, value: unknown): T {
 type ChatRecord = ChatInfo & { busy?: string; observedHead?: Position };
 type RunRecord = RunInfo & { generation: Generation; observed?: Position };
 type Idempotency = { signature: string; kind: 'run' | 'value' | 'operation'; id?: string; value?: any; status?: 'pending' | 'uncertain' };
+const temporaryUncertain = { code: 'TEMPORARY_RESULT_UNRECOVERABLE', message: 'Temporary response was not saved completely. Upstream history is unavailable; this request will not be resent.' };
 
 export class ApiService {
   store: Store;
@@ -32,7 +33,7 @@ export class ApiService {
     this.store.transaction(() => {
       for (const run of this.store.list<RunRecord>('runs')) {
         if (run.status === 'running' || run.status === 'waiting_tool') {
-          run.status = 'uncertain'; run.error = { code: 'PROCESS_INTERRUPTED', message: 'Query upstream before any retry' };
+          run.status = 'uncertain'; run.error = run.temporary ? temporaryUncertain : { code: 'PROCESS_INTERRUPTED', message: 'Query upstream before any retry' };
           this.store.put('runs', run.id, run); this.store.event(run.id, 'run.uncertain', { error: run.error });
         }
       }
@@ -74,14 +75,16 @@ export class ApiService {
   events(id: string, after: number) { this.getRun(id); if (!Number.isSafeInteger(after) || after < 0) fail('INVALID_CURSOR', 400); return this.store.events(id, after); }
   async capabilities(accountId = 'default') { return this.backend.capabilities(accountId); }
   async createChat(options: CreateChat, key: string): Promise<ChatInfo> {
-    const parsed = validate(z.object({ accountId: idSchema.default('default'), model: idSchema, tools: z.object({ toolset: idSchema }).strict().optional() }).strict(), options);
+    const parsed = validate(z.object({ accountId: idSchema.default('default'), model: idSchema, temporary: z.boolean().optional(), tools: z.object({ toolset: idSchema }).strict().optional() }).strict(), options);
+    // Preserve existing normal-chat idempotency signatures across upgrades.
+    if (!parsed.temporary) delete parsed.temporary;
     return this.locked('create', async () => {
       const old = this.replay('create', key, parsed); if (old) return old;
       const caps = await this.backend.capabilities(parsed.accountId);
       if (!caps.models.includes(parsed.model)) fail('MODEL_UNAVAILABLE', 400);
       // Binding native MCP to an API-created conversation is not yet verified.
       if (parsed.tools) fail('CAPABILITY_UNAVAILABLE', 400);
-      const chat: ChatInfo = { id: randomUUID(), accountId: parsed.accountId, model: parsed.model, revision: 0, toolBinding: 'none' };
+      const chat: ChatInfo = { id: randomUUID(), accountId: parsed.accountId, model: parsed.model, revision: 0, toolBinding: 'none', ...(parsed.temporary ? { temporary: true } : {}) };
       this.store.transaction(() => { this.store.put('chats', chat.id, chat); this.remember('create', key, parsed, { kind: 'value', signature: '', value: chat }); });
       return chat;
     });
@@ -94,6 +97,7 @@ export class ApiService {
       const existing = this.store.list<ChatRecord>('chats').find(c => c.accountId === parsed.accountId && c.upstream?.cid === parsed.upstream.cid);
       return this.locked(existing?.id ?? `attach:${parsed.upstream.cid}`, async () => {
         const current = existing ? this.chat(existing.id) : undefined;
+        if (current?.temporary) fail('CAPABILITY_UNAVAILABLE');
         if (current?.busy) fail('CHAT_BUSY');
         const turns = await this.backend.history(parsed.upstream.cid, parsed.accountId);
         if (this.closed) fail('SERVICE_CLOSED', 503);
@@ -118,9 +122,14 @@ export class ApiService {
     if (chat.busy) fail('CHAT_BUSY');
     if (!Number.isSafeInteger(revision) || chat.revision !== revision) fail('CHAT_CHANGED');
     if (!chat.upstream) return [];
-    const turns = await this.backend.history(chat.upstream.cid, chat.accountId);
+    const turns = chat.temporary ? this.localTurns(chat.id) : await this.backend.history(chat.upstream.cid, chat.accountId);
     if (!samePosition(chat.observedHead ?? chat.head, turns.at(-1)?.position)) fail('CHAT_CHANGED');
     return this.decorate(chat.id, this.project(chat, turns));
+  }
+  private localTurns(chatId: string): TurnData[] {
+    return this.store.list<RunRecord>('runs')
+      .filter(run => run.chatId === chatId && run.status === 'completed' && run.turn)
+      .map(run => ({ position: run.turn!.position, input: run.generation.input, output: run.turn!.output }));
   }
   private project(chat: ChatRecord, turns: TurnData[]): TurnData[] {
     if (!chat.head || samePosition(chat.head, turns.at(-1)?.position)) return turns;
@@ -175,7 +184,7 @@ export class ApiService {
   async history(id: string, cursor?: string, limit = 20) {
     const chat = this.chat(id);
     if (!Number.isSafeInteger(limit) || limit < 1 || limit > 100) fail('INVALID_INPUT', 400);
-    const turns = this.decorate(id, this.project(chat, chat.upstream ? await this.backend.history(chat.upstream.cid, chat.accountId) : []));
+    const turns = this.decorate(id, this.project(chat, chat.temporary ? this.localTurns(id) : chat.upstream ? await this.backend.history(chat.upstream.cid, chat.accountId) : []));
     const fingerprint = createHash('sha256').update(canonical(turns.map(t => t.position))).digest('hex').slice(0, 16);
     let offset = 0;
     if (cursor) { const match = /^([a-f0-9]{16}):(\d+)$/.exec(cursor); if (!match || match[1] !== fingerprint) fail('HISTORY_CHANGED'); offset = Number(match[2]); }
@@ -196,9 +205,10 @@ export class ApiService {
     const index = at ? this.find(chat, at, turns) : turns.length;
     const generation: Generation = {
       id, accountId: chat.accountId, model: chat.model, operation, cid: chat.upstream?.cid, at,
+      ...(chat.temporary ? { temporary: true } : {}),
       parent: operation === 'send' ? chat.head : turns[index - 1]?.position, input, baseline: turns.map(t => t.position),
     };
-    const run: RunRecord = { id, chatId: chat.id, status: 'running', operation, base: generation.parent, generation };
+    const run: RunRecord = { id, chatId: chat.id, status: 'running', operation, base: generation.parent, generation, ...(chat.temporary ? { temporary: true } : {}) };
     this.store.transaction(() => {
       chat.busy = id; chat.revision++; this.store.put('chats', chat.id, chat); this.store.put('runs', id, run);
       this.remember(scope, key, payload, { kind: 'run', id, signature: '' }); this.store.event(id, 'run.started');
@@ -219,6 +229,7 @@ export class ApiService {
       run = this.store.get<RunRecord>('runs', run.id)!;
       run.status = error instanceof ApiError && error.code === 'GENERATION_REJECTED' ? 'failed' : 'uncertain';
       run.error = { code: error instanceof ApiError ? error.code : 'UPSTREAM_UNCERTAIN', message: error instanceof ApiError ? error.message : 'Upstream outcome is unknown; generation was not repeated' };
+      if (run.temporary && run.status === 'uncertain') run.error = temporaryUncertain;
       this.store.transaction(() => {
         this.store.put('runs', run.id, run); this.store.event(run.id, `run.${run.status}`, { error: run.error });
         if (run.status === 'failed') { const chat = this.chat(run.chatId); delete chat.busy; chat.revision++; this.store.put('chats', chat.id, chat); }
@@ -245,7 +256,7 @@ export class ApiService {
     const info = this.getRun(id);
     return this.locked(info.chatId, async () => {
       const run = this.store.get<RunRecord>('runs', id)!;
-      if (run.status !== 'uncertain') return this.getRun(id);
+      if (run.status !== 'uncertain' || run.temporary) return this.getRun(id);
       const turn = await this.backend.recover(run.generation, run.observed);
       if (turn) this.finish(run, turn);
       return this.getRun(id);
@@ -257,6 +268,7 @@ export class ApiService {
     return this.locked(id, async () => {
       const scope = `fork:${id}`, old = this.replay(scope, key, payload);
       if (old) return old.id ? { mode: 'in-place', chat: this.getChat(id), run: old } : old;
+      if (this.chat(id).temporary) fail('CAPABILITY_UNAVAILABLE');
       const chat = this.chat(id), turns = await this.check(chat, revision);
       if (!(await this.backend.capabilities(chat.accountId)).fork) fail('CAPABILITY_UNAVAILABLE');
       const index = this.find(chat, parsed.at, turns);
@@ -283,6 +295,7 @@ export class ApiService {
     validate(positionSchema, at);
     return this.locked(id, async () => {
       const scope = `regenerate:${id}`, old = this.replay(scope, key, at); if (old) return old;
+      if (this.chat(id).temporary) fail('CAPABILITY_UNAVAILABLE');
       const chat = this.chat(id), turns = await this.check(chat, revision);
       if (!(await this.backend.capabilities(chat.accountId)).regenerate) fail('CAPABILITY_UNAVAILABLE');
       const index = this.find(chat, at, turns);
@@ -294,6 +307,7 @@ export class ApiService {
     validate(positionSchema, at);
     return this.locked(id, async () => {
       const scope = `select:${id}`, old = this.replay(scope, key, at); if (old) return old;
+      if (this.chat(id).temporary) fail('CAPABILITY_UNAVAILABLE');
       const chat = this.chat(id), turns = await this.check(chat, revision);
       if (!(await this.backend.capabilities(chat.accountId)).select) fail('CAPABILITY_UNAVAILABLE');
       const last = turns.at(-1);

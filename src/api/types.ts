@@ -10,12 +10,14 @@ export type TurnData = {
 export type Turn = Omit<TurnData, 'input'> & { id: string; chatId: string; input: { text: string; files: FileRef[] } };
 export type ChatInfo = {
   id: string; accountId: string; model: string; revision: number;
+  temporary?: boolean;
   upstream?: { cid: string }; head?: Position;
   source?: { chatId: string; at: Position };
   toolBinding: 'none' | 'unverified' | 'ready';
 };
 export type RunInfo = {
   id: string; chatId: string;
+  temporary?: boolean;
   status: 'running' | 'waiting_tool' | 'completed' | 'failed' | 'uncertain';
   operation: 'send' | 'fork-in-place' | 'regenerate';
   base?: Position; turn?: Turn;
@@ -23,7 +25,7 @@ export type RunInfo = {
 };
 export type RunEvent = { id: number; runId: string; type: string; at: string; [key: string]: unknown };
 export type Input = { text: string; files?: string[] };
-export type CreateChat = { accountId?: string; model: string; tools?: { toolset: string } };
+export type CreateChat = { accountId?: string; model: string; temporary?: boolean; tools?: { toolset: string } };
 export type AttachChat = { accountId?: string; upstream: { cid: string } };
 export type ForkInput =
   | { mode?: 'new-chat'; at: Position }
@@ -34,6 +36,7 @@ export type ForkResult =
 export type Capabilities = { models: string[]; send: boolean; fork: boolean; regenerate: boolean; select: boolean; nativeMcp: boolean };
 export type Generation = {
   id: string; accountId: string; model: string; cid?: string;
+  temporary?: boolean;
   operation: RunInfo['operation']; at?: Position; parent?: Position;
   input: { text: string; files: Attachment[] };
   baseline: Position[];

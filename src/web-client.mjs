@@ -33,11 +33,12 @@ export class WebAPI {
     }
     return refs;
   }
-  /** @param {{id?: string, prompt: string, metadata?: any[], files?: any[], operationFlag?: number}} input */
-  async start({id=crypto.randomUUID(),prompt,metadata=['','',''],files=[],operationFlag}){
+  /** @param {{id?: string, prompt: string, metadata?: any[], files?: any[], operationFlag?: number, temporary?: boolean}} input */
+  async start({id=crypto.randomUUID(),prompt,metadata=['','',''],files=[],operationFlag,temporary=false}){
     if(typeof prompt!=='string'||!prompt.length||prompt.length>120000)throw Error('PROMPT_SIZE_LIMIT');
+    if(typeof temporary!=='boolean')throw Error('INVALID_CHAT_MODE');
     if(operationFlag!==undefined&&![2,5].includes(operationFlag))throw Error('INVALID_OPERATION_FLAG');
-    const input={id,prompt,metadata,files,...(operationFlag===undefined?{}:{operationFlag})},signature=JSON.stringify(input),prior=this.requests.get(id);
+    const input={id,prompt,metadata,files,temporary,...(operationFlag===undefined?{}:{operationFlag})},signature=JSON.stringify(input),prior=this.requests.get(id);
     if(prior){if(prior.signature!==signature)throw Error('REQUEST_ID_CONFLICT');return id;}
     const state={signature,raw:'',done:false,status:null,startedAt:Date.now()};this.requests.set(id,state);
     state.task=this.generate(input,state).catch(e=>{state.error=e.name==='TimeoutError'?'GENERATION_TIMEOUT':/^[A-Z][A-Z_0-9: ]*$/.test(e.message)?e.message:'TRANSPORT_ERROR';}).finally(()=>{state.done=true;state.elapsedMs=Date.now()-state.startedAt;});
@@ -51,6 +52,7 @@ export class WebAPI {
     // Sending a locally generated attestation caused generic error answers; omission is supported.
     body[6]=[0];body[7]=1;body[10]=1;body[11]=0;body[17]=[[0]];body[18]=0;body[27]=1;body[30]=[4];body[41]=[1];body[53]=0;body[59]=input.id;body[61]=[];body[68]=1;body[79]=8;body[80]=1;body[91]=0;body[96]=0;
     if(input.operationFlag!==undefined)body[72]=input.operationFlag;
+    if(input.temporary)body[45]=1;
     const query=new URLSearchParams({bl:this.session.build,'f.sid':this.session.sessionId,hl:'en',_reqid:String(crypto.randomInt(100000,1000000)),rt:'c'});
     const modelHeader=[1,null,null,null,ARGON,null,null,0,[4,5,6,8],null,null,1,null,null,8,1,crypto.randomUUID()];
     const headers={'content-type':'application/x-www-form-urlencoded;charset=UTF-8','x-same-domain':'1','x-goog-authuser':'0','x-goog-ext-73010989-jspb':'[0]','x-goog-ext-73010990-jspb':'[0,0,0]','x-goog-ext-525001261-jspb':JSON.stringify(modelHeader),'x-goog-ext-525005358-jspb':JSON.stringify([input.id,1])};

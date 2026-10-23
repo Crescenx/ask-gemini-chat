@@ -60,6 +60,35 @@ test('slow and uncertain answers keep their original run and recover only by his
   assert.equal(recovered.status, 'completed'); assert.equal(recovered.text, 'reply:slow hello');
   assert.equal(backend.generations.length, 1);
 });
+
+test('agent chooses a fixed chat mode; temporary retries, polling and continuation never fetch history', async t => {
+  const { backend, service, client, call } = await setup(t);
+  const tool = (await client.listTools()).tools.find(t => t.name === 'ask_gemini_chat')!;
+  assert.match(tool.description!, /one-shot/); assert.match(tool.description!, /multi-turn/);
+  backend.history = async () => { assert.fail('temporary history must stay local'); };
+  backend.recover = async () => { assert.fail('temporary recovery must not query upstream'); };
+  let release!: () => void;
+  backend.gate = new Promise<void>(resolve => { release = resolve; });
+  const args = { request_id: 'temporary-1', prompt: 'one shot', mode: 'temporary', wait_ms: 0 };
+  const first = await call('ask_gemini_chat', args);
+  assert.equal(first.mode, 'temporary'); assert.equal(first.status, 'running');
+  assert.equal((await call('ask_gemini_chat', args)).run_id, first.run_id);
+  assert.equal((await call('ask_gemini_chat', { ...args, mode: 'normal' })).error, 'IDEMPOTENCY_CONFLICT');
+  release(); await until(() => service.getRun(first.run_id).status === 'completed');
+  const saved = await call('get_gemini_result', { run_id: first.run_id, wait_ms: 0 });
+  assert.equal(saved.text, 'reply:one shot'); assert.equal(saved.mode, 'temporary');
+  assert.equal((await call('ask_gemini_chat', { ...args, chat_id: first.chat_id, mode: 'normal' })).error, 'CHAT_MODE_MISMATCH');
+  const next = await call('ask_gemini_chat', { request_id: 'temporary-2', chat_id: first.chat_id, prompt: 'follow up', wait_ms: 1000 });
+  assert.equal(next.mode, 'temporary'); assert.equal(next.status, 'completed');
+  assert.deepEqual(backend.generations[1].parent, saved.position);
+  assert(backend.generations.every(g => g.temporary));
+  backend.failAfterWrite = true;
+  const failed = await call('ask_gemini_chat', { request_id: 'temporary-3', chat_id: first.chat_id, prompt: 'interrupted', wait_ms: 1000 });
+  assert.equal(failed.status, 'uncertain'); assert.equal(failed.error.code, 'TEMPORARY_RESULT_UNRECOVERABLE');
+  const polled = await call('get_gemini_result', { run_id: failed.run_id, wait_ms: 0 });
+  assert.equal(polled.status, 'uncertain'); assert.match(polled.next, /Stop polling/);
+  assert.equal(backend.generations.length, 3);
+});
 test('local MCP uploads file bytes once, attaches by ID, and rejects changed or invalid files', async t => {
   const { backend, service } = await setup(t);
   const dir = await mkdtemp(join(tmpdir(), 'agent-file-'));
@@ -85,8 +114,9 @@ test('local MCP uploads file bytes once, attaches by ID, and rejects changed or 
   assert.equal(file.size, Buffer.byteLength(content));
   assert.equal((await call('upload_gemini_file', args)).file_id, file.file_id);
   assert.equal(uploads, 1);
-  const answer = await call('ask_gemini_chat', { request_id: 'file-question', prompt: 'Read the receipt', file_ids: [file.file_id], wait_ms: 1000 });
+  const answer = await call('ask_gemini_chat', { request_id: 'file-question', prompt: 'Read the receipt', mode: 'temporary', file_ids: [file.file_id], wait_ms: 1000 });
   assert.equal(answer.status, 'completed');
+  assert.equal(answer.mode, 'temporary'); assert.equal(backend.generations[0].temporary, true);
   assert.equal(backend.generations[0].input.files[0].reference, 'uploaded-receipt');
   await writeFile(path, 'changed');
   assert.equal((await call('upload_gemini_file', args)).error, 'IDEMPOTENCY_CONFLICT');

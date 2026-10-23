@@ -123,6 +123,38 @@ is not provided. The package is marked private to prevent accidental npm publica
 
 ## Use
 
+Choose the chat mode based on the task:
+
+- Use `mode: "normal"` for planned multi-turn discussions, reusable context, or
+  conversations you want to keep in Gemini history.
+- Use `mode: "temporary"` for one-shot answers or conversations that do not need
+  to appear in Gemini history. The agent makes this choice; the server does not
+  guess from the prompt or silently fall back to normal mode.
+
+Omitting `mode` on a new chat preserves the existing normal behavior. When
+continuing with `chat_id`, omit `mode` to inherit it; explicitly changing it
+returns `CHAT_MODE_MISMATCH`. Results include the effective `mode`.
+
+For a one-shot request:
+
+```json
+{"request_id":"quick-check-1","mode":"temporary","prompt":"Compute 23 + 48.","wait_ms":20000}
+```
+
+Temporary chats support attachments, polling, duplicate-request replay, and
+continuation using their saved `chat_id`. They do not support the internal
+fork/edit/regenerate/select operations. Google history is unavailable for these
+chats: completion requires a fully consumed response stream with a completed
+candidate and valid turn IDs. An interrupted response that was not saved in full
+remains `uncertain` with `TEMPORARY_RESULT_UNRECOVERABLE`; stop polling and report
+the unknown outcome instead of resubmitting it. An incomplete temporary chat
+cannot accept another question. Completed local results remain retrievable
+after a server restart.
+
+Temporary mode controls **Gemini history**, not local storage. Local prompts,
+answers, attachment references and request IDs are still stored for polling,
+continuation and deduplication. It is not a zero-retention or logged-out mode.
+
 Upload a file:
 
 ```json
@@ -132,7 +164,7 @@ Upload a file:
 Ask with the returned file ID:
 
 ```json
-{"request_id":"question-1","prompt":"Compute the totals and explain the rules.","file_ids":["RETURNED_FILE_ID"],"wait_ms":20000}
+{"request_id":"question-1","mode":"normal","prompt":"Compute the totals and explain the rules.","file_ids":["RETURNED_FILE_ID"],"wait_ms":20000}
 ```
 
 If the answer is still `running`, call `get_gemini_result`:
@@ -147,10 +179,13 @@ and a new `request_id`. Up to eight files and 120,000 prompt characters are acce
 
 **Keep the same request ID and arguments when retrying an interrupted tool call.**
 Changing its arguments produces `IDEMPOTENCY_CONFLICT`. A result marked `uncertain`
-means completion is unknown: query its original run; do not submit a new question
-to recover it. Recovery checks exact upstream turn IDs, prompt and parent context.
-A `completed` status confirms committed upstream output, not the correctness of
-its content; Google can also return error prose as a completed answer.
+means completion is unknown: query its original run for a normal chat; do not
+submit a new question to recover it. Normal-chat recovery checks exact upstream
+turn IDs, prompt and parent context. Temporary uncertain results cannot be
+recovered from upstream history. A normal `completed` result confirms committed
+upstream output; a temporary `completed` result confirms a fully received final
+response. Neither confirms the correctness of its content; Google can also
+return error prose as a completed answer.
 
 ## Local storage
 
@@ -197,6 +232,15 @@ On WSL, Chrome discovery and read-only synchronization were verified against an
 already-authorized browser connection. The new `verify` command received a correct
 real answer and confirmed Argon from history; rerunning reused its saved success.
 A fresh Chrome permission dialog and native macOS/Windows installs were not tested.
+
+Normal and temporary modes were verified through the standalone stdio entrypoint
+on 2026-10-23. Live checks covered a temporary CSV attachment question, retrieval
+after a server restart, continuation without reattaching the file, ordinary
+multi-turn context, duplicate-request replay, and mode-conflict rejection.
+The response streams identified Argon (`95a4c0abcba24364`); temporary calls made no
+upstream history queries. Type-checking and 50 tests passed, including simulated
+interrupted temporary streams and process restarts. Long-term temporary-context
+expiry was not tested. Private live evidence is excluded from the repository.
 
 The shared state/backend implementation retains internal revision and history
 operations so existing recovery invariants stay intact. Only the three tools above

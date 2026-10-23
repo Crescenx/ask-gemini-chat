@@ -32,8 +32,9 @@ export class NativeBackend implements Backend {
   async generate(input: Generation, observe: (event: Observation) => void): Promise<TurnData> {
     this.account(input.accountId);
     if (input.model !== 'argon') throw new ApiError('GENERATION_REJECTED', 'MODEL_UNAVAILABLE', 400);
+    if (input.temporary && input.operation !== 'send') throw new ApiError('GENERATION_REJECTED', 'Temporary chats support send only', 400);
     const fields = operationFields(input.operation, input.operation === 'send' ? input.parent : input.at, input.parent);
-    const id = await this.api.start({ id: input.id, prompt: input.input.text, metadata: fields.metadata, files: input.input.files.map(attachmentFields), ...(fields.operationFlag === undefined ? {} : { operationFlag: fields.operationFlag }) });
+    const id = await this.api.start({ id: input.id, prompt: input.input.text, metadata: fields.metadata, files: input.input.files.map(attachmentFields), temporary: input.temporary, ...(fields.operationFlag === undefined ? {} : { operationFlag: fields.operationFlag }) });
     let lastText = '', observed: Position | undefined;
     const started = Date.now();
     for (;;) {
@@ -55,6 +56,15 @@ export class NativeBackend implements Backend {
           throw new ApiError(code, `Upstream RPC ${rejection.rpcCode}, BardErrorInfo ${rejection.code ?? 'unspecified'}`, 502);
         }
         if (state.error || !state.exhausted || !parsed.complete || !observed) throw new ApiError('UPSTREAM_UNCERTAIN', 'Generation did not reach verified completion');
+        if (input.temporary) {
+          const position = observed;
+          if (!/^c_[a-f0-9]+$/.test(position.cid) || !/^r_[a-f0-9]+$/.test(position.rid) || !/^rc_[a-f0-9]+$/.test(position.rcid ?? '') ||
+              (input.cid && position.cid !== input.cid) || input.baseline.some(p => p.cid === position.cid && p.rid === position.rid)) {
+            throw new ApiError('UPSTREAM_UNCERTAIN', 'Temporary stream has invalid or stale turn identifiers');
+          }
+          // Temporary chats have no readable upstream history; require the entire response stream.
+          return { position, input: input.input, output: { text: parsed.text } };
+        }
         const recovered = await this.recover(input, observed);
         if (!recovered) throw new ApiError('UPSTREAM_UNCERTAIN', 'Completed stream has no matching committed history');
         return recovered;
@@ -64,6 +74,7 @@ export class NativeBackend implements Backend {
     }
   }
   async recover(input: Generation, observed?: Position): Promise<TurnData | null> {
+    if (input.temporary) return null;
     if (!observed || input.baseline.some(p => p.cid === observed.cid && p.rid === observed.rid)) return null;
     let turns: TurnData[];
     try { turns = await this.history(observed.cid, input.accountId); }

@@ -86,3 +86,39 @@ test('a disconnected preamble retains its exact turn ID for read-only recovery',
   assert.equal(await adapter.recover(request, { ...observed, rcid: 'rc_other' }), null);
   assert.equal(await adapter.recover({ ...request, input: { ...request.input, text: 'different' } }, observed), null);
 });
+
+test('temporary completion waits for stream exhaustion and preserves attachments without history', async () => {
+  let submitted: any, polls = 0;
+  const input: Generation = { ...request, operation: 'send', temporary: true };
+  const api = {
+    start: async (value: any) => { submitted = value; return value.id; },
+    poll: async () => ({ done: ++polls > 1, exhausted: polls > 1, raw: generation('r_3', 'answer') }),
+    history: async () => { throw Error('temporary history must not be queried'); },
+  };
+  const backend = new NativeBackend({ api: api as any, pollMs: 1 });
+  const result = await backend.generate(input, () => {});
+  assert.equal(polls, 2); assert.equal(submitted.temporary, true);
+  assert.equal(submitted.operationFlag, undefined); assert.deepEqual(submitted.metadata, ['c_abcd', 'r_1', 'rc_1']);
+  assert.deepEqual(result.input.files, input.input.files); assert.equal(result.output.text, 'answer');
+  assert.equal(await backend.recover(input, result.position), null);
+  await assert.rejects(backend.generate({ ...input, operation: 'regenerate' }, () => {}), { code: 'GENERATION_REJECTED' });
+});
+
+test('temporary streams reject interruption, incomplete, stale and mismatched results', async () => {
+  const input: Generation = { ...request, operation: 'send', temporary: true };
+  const raw = generation('r_3', 'answer');
+  const partial = JSON.stringify([['wrb.fr', null, JSON.stringify([null, ['c_abcd', 'r_3'], null, null, [candidate('rc_3', 'partial', 1)]])]]) + '\n';
+  const states = [
+    { done: true, exhausted: false, raw },
+    { done: true, exhausted: true, error: 'TRANSPORT_ERROR', raw },
+    { done: true, exhausted: true, raw: partial },
+    { done: true, exhausted: true, raw: raw + partial },
+    { done: true, exhausted: true, raw: generation('r_2', 'stale') },
+    { done: true, exhausted: true, raw: raw.replace('c_abcd', 'c_ffff') },
+    { done: true, exhausted: true, raw: raw.replace('rc_3', '') },
+  ];
+  for (const state of states) {
+    const api = { start: async () => input.id, poll: async () => state, history: async () => { assert.fail('must not query history'); } };
+    await assert.rejects(new NativeBackend({ api: api as any }).generate(input, () => {}), { code: 'UPSTREAM_UNCERTAIN' });
+  }
+});
