@@ -2,6 +2,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import fs from 'node:fs/promises';
 import path from 'node:path';
+import {spawn} from 'node:child_process';
 import {tmpdir} from 'node:os';
 import {SessionAuth,importCookies} from './web-auth.mjs';
 
@@ -26,8 +27,8 @@ test('initial import validates directly over HTTP, stores private cookies and bi
   assert.equal(await fs.readFile(file,'utf8'),original);
 }));
 test('HTTP rotation updates cookies once for concurrent callers and revalidates account',()=>fixture(async file=>{
-  let rotations=0;
-  const auth=new SessionAuth({file,now:()=>1000000,fetchImpl:async(url,options)=>{
+  let rotations=0,now=1000000;
+  const auth=new SessionAuth({file,now:()=>now,fetchImpl:async(url,options)=>{
     if(url.endsWith('/RotateCookies')){rotations++;return new Response('[]',{headers:{'set-cookie':'__Secure-1PSIDTS=new-ts; Secure; HttpOnly'}});}
     if(rotations)assert(options.headers.cookie.includes('__Secure-1PSIDTS=new-ts'));
     return new Response(page());
@@ -36,6 +37,7 @@ test('HTTP rotation updates cookies once for concurrent callers and revalidates 
   await Promise.all([auth.ensure(),auth.ensure()]);assert.equal(rotations,1);
   assert.equal(JSON.parse(await fs.readFile(file)).cookies['__Secure-1PSIDTS'],'new-ts');
   await auth.ensure();assert.equal(rotations,1);
+  now+=600000;await auth.ensure();assert.equal(rotations,2);
 }));
 test('revoked login becomes explicit reauth; transient errors preserve session',()=>fixture(async file=>{
   let status=200;
@@ -69,4 +71,75 @@ test('server-cleared root cookie stays recoverable through reimport',()=>fixture
   assert.deepEqual(await auth.status(),{state:'login_required',code:'LOGIN_REQUIRED'});
   revoked=false;await auth.import({'__Secure-1PSID':'replacement'});
   assert.equal((await auth.status()).state,'ready');
+}));
+
+test('separate processes serialize rotation and persist the newest cookies',()=>fixture(async file=>{
+  const auth=new SessionAuth({file,fetchImpl:async()=>new Response(page())});
+  await auth.import({'__Secure-1PSID':'root'});
+  const source=`
+    import {SessionAuth} from ${JSON.stringify(new URL('./web-auth.mjs',import.meta.url).href)};
+    const auth=new SessionAuth({file:process.argv[1],fetchImpl:async(url,options)=>{
+      if(url.endsWith('/RotateCookies')){
+        const n=Number(options.headers.cookie.match(/__Secure-1PSIDTS=(\\d+)/)?.[1]||0)+1;
+        await new Promise(r=>setTimeout(r,100));
+        return new Response('[]',{headers:{'set-cookie':'__Secure-1PSIDTS='+n+'; Secure'}});
+      }
+      return new Response(${JSON.stringify(page())});
+    }});
+    await auth.ensure({refresh:true});
+  `;
+  const run=()=>new Promise((resolve,reject)=>{
+    const child=spawn(process.execPath,['--input-type=module','-e',source,file],{stdio:'ignore'});
+    child.once('error',reject);child.once('exit',code=>code===0?resolve():reject(Error('child exit '+code)));
+  });
+  await Promise.all([run(),run(),run()]);
+  assert.equal((await auth.load()).cookies['__Secure-1PSIDTS'],'3');
+}));
+
+test('login waits for refresh and cannot be overwritten by its old snapshot',()=>fixture(async file=>{
+  let unblock,entered;
+  const started=new Promise(r=>{entered=r;});
+  const auth=new SessionAuth({file,fetchImpl:async url=>{
+    if(url.endsWith('/RotateCookies')){entered();await new Promise(r=>{unblock=r;});return new Response('[]');}
+    return new Response(page());
+  }});
+  await auth.import({'__Secure-1PSID':'old'});
+  const refresh=auth.ensure();await started;
+  const other=new SessionAuth({file,fetchImpl:async()=>new Response(page())});
+  const login=other.import({'__Secure-1PSID':'new'});
+  unblock();await Promise.all([refresh,login]);
+  assert.equal((await auth.load()).cookies['__Secure-1PSID'],'new');
+}));
+
+test('a crashed refresh releases the cross-process lock',()=>fixture(async file=>{
+  const auth=new SessionAuth({file,fetchImpl:async()=>new Response(page())});
+  await auth.import({'__Secure-1PSID':'root'});
+  const source=`
+    import {SessionAuth} from ${JSON.stringify(new URL('./web-auth.mjs',import.meta.url).href)};
+    const auth=new SessionAuth({file:process.argv[1]});
+    await auth.exclusive(async()=>{console.log('locked');await new Promise(r=>setTimeout(r,60000));});
+  `;
+  const child=spawn(process.execPath,['--input-type=module','-e',source,file],{stdio:['ignore','pipe','ignore']});
+  const exited=new Promise(resolve=>child.once('exit',resolve));
+  try{
+    await new Promise((resolve,reject)=>{
+      child.stdout.once('data',resolve);child.once('error',reject);
+      child.once('exit',()=>reject(Error('child exited before locking')));
+    });
+    child.kill('SIGKILL');await exited;
+    await auth.ensure();assert.equal((await auth.load()).state,'ready');
+  }finally{child.kill('SIGKILL');await exited;}
+}));
+
+test('account mismatch pauses maintenance without replacing account or cookies',()=>fixture(async file=>{
+  let changed=false;
+  const auth=new SessionAuth({file,fetchImpl:async url=>url.endsWith('/RotateCookies')
+    ?new Response('[]',{headers:{'set-cookie':'__Secure-1PSIDTS=changed; Secure'}})
+    :new Response(page(changed?'different@example.invalid':'test@example.invalid'))});
+  await auth.import({'__Secure-1PSID':'root','__Secure-1PSIDTS':'original'});
+  const before=await auth.load();changed=true;
+  await assert.rejects(auth.ensure(),/ACCOUNT_MISMATCH/);
+  const after=await auth.load();
+  assert.equal(after.state,'login_required');assert.equal(after.account,before.account);
+  assert.deepEqual(after.cookies,before.cookies);
 }));

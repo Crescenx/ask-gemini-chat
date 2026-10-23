@@ -69,6 +69,25 @@ test('lost transport after upstream completion recovers exact observed turn with
   assert(x.service.events(run.id, 0).some(e => e.type === 'run.completed'));
 });
 
+test('corrected partial snapshots survive restart and are cleared only on verified completion',async t=>{
+  const x=await setup(t);
+  let calls=0;
+  x.backend.generate=async(input,observe)=>{
+    calls++;const result=turn('c_abcd',1,input.input.text);
+    x.backend.paths.set('c_abcd',[result]);
+    observe({type:'position',position:result.position});
+    observe({type:'text.delta',delta:'wrong'});observe({type:'text.replace',text:'corrected partial'});
+    throw Error('transport broke');
+  };
+  const chat=await x.service.createChat({model:'argon'},'create');
+  const r=await x.service.send(chat.id,{text:'fixture'},'send',chat.revision);
+  await until(()=>x.service.getRun(r.id).status==='uncertain');
+  x.restart();assert.equal(x.service.getRun(r.id).partial?.text,'corrected partial');
+  const recovered=await x.service.refresh(r.id);
+  assert.equal(recovered.status,'completed');assert.equal(recovered.partial,undefined);
+  assert.equal(recovered.turn?.output.text,'reply:fixture');assert.equal(calls,1);
+});
+
 test('temporary saved results and context survive restart without upstream history', async t => {
   const x = await setup(t);
   x.backend.history = async () => { assert.fail('no upstream history for temporary chats'); };

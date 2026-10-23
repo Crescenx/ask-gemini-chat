@@ -2,6 +2,8 @@ import fs from 'node:fs/promises';
 import {sessionFile} from './config.mjs';
 import path from 'node:path';
 import crypto from 'node:crypto';
+import {DatabaseSync} from 'node:sqlite';
+import {setTimeout as delay} from 'node:timers/promises';
 import {httpFetch} from './http-fetch.mjs';
 
 const APP='https://gemini.google.com/app';
@@ -43,6 +45,25 @@ async function atomicSave(file,value){
 
 export class SessionAuth {
   constructor({file=sessionFile,fetchImpl=httpFetch,now=Date.now}={}){this.file=file;this.fetch=fetchImpl;this.now=now;}
+  async exclusive(operation){
+    await fs.mkdir(path.dirname(this.file),{recursive:true,mode:0o700});
+    const lockFile=this.file+'.lock.sqlite';
+    const handle=await fs.open(lockFile,'a',0o600);await handle.close();
+    const db=new DatabaseSync(lockFile);
+    const deadline=Date.now()+90000;
+    try{
+      // SQLite releases this cross-process lock even if a refresher crashes.
+      for(;;){
+        try{db.exec('BEGIN IMMEDIATE');break;}
+        catch(error){
+          if(error.errcode!==5)throw error;
+          if(Date.now()>=deadline)throw new AuthError('SESSION_BUSY');
+          await delay(50);
+        }
+      }
+      return await operation();
+    }finally{db.close();}
+  }
   async load(){
     try{return JSON.parse(await fs.readFile(this.file,'utf8'));}
     catch(e){if(e.code==='ENOENT')throw new AuthError('LOGIN_REQUIRED');throw e;}
@@ -63,10 +84,13 @@ export class SessionAuth {
     return response;
   }
   async rotate(cookies){
-    await this.request(ROTATE,cookies,{method:'POST',headers:{'content-type':'application/json','origin':'https://accounts.google.com'},body:'[000,"-0000000000000000000"]'});
+    await (await this.request(ROTATE,cookies,{method:'POST',headers:{'content-type':'application/json','origin':'https://accounts.google.com'},body:'[000,"-0000000000000000000"]'})).text();
   }
   async validate(cookies){return bootstrap(await (await this.request(APP,cookies)).text());}
   async import(value){
+    return this.exclusive(()=>this._import(value));
+  }
+  async _import(value){
     let previous;try{previous=await this.load();}catch(e){if(e.code!=='LOGIN_REQUIRED')throw e;}
     const cookies=importCookies(value);let session,rotated=false;
     try{session=await this.validate(cookies);}catch(e){
@@ -80,7 +104,7 @@ export class SessionAuth {
   async ensure({refresh=false}={}){
     // Sharing this promise also prevents concurrent rotations within one client.
     if(this.pending)return this.pending;
-    this.pending=this._ensure(refresh);
+    this.pending=this.exclusive(()=>this._ensure(refresh));
     try{return await this.pending;}finally{this.pending=null;}
   }
   async _ensure(refresh){
@@ -89,7 +113,7 @@ export class SessionAuth {
     const cookies=importCookies(stored.cookies);
     let rotated=false;
     try{
-      if(refresh||this.now()-(stored.refreshedAt??0)>600000){await this.rotate(cookies);rotated=true;}
+      if(refresh||this.now()-(stored.refreshedAt??0)>=600000){await this.rotate(cookies);rotated=true;}
       let session;
       try{session=await this.validate(cookies);}catch(e){
         if(e.code!=='LOGIN_REQUIRED'||rotated)throw e;
@@ -100,6 +124,7 @@ export class SessionAuth {
       return {...session,cookies};
     }catch(e){
       if(e.code==='LOGIN_REQUIRED')await atomicSave(this.file,{...stored,cookies,state:'login_required'});
+      if(e.code==='ACCOUNT_MISMATCH')await atomicSave(this.file,{...stored,state:'login_required'});
       throw e;
     }
   }

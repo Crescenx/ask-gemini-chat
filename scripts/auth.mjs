@@ -28,7 +28,7 @@ function guidance(code) {
     ALLOW_CHROME_CONNECTION: 'Confirm Allow in Chrome once. Keep this process running; it reuses this connection while you sign in.',
     OPEN_GEMINI_IN_BROWSER: 'Open https://gemini.google.com/app in this Chrome profile and sign in yourself. This process is waiting.',
     SIGN_IN_TO_GEMINI: 'Finish Google sign-in and any MFA in your own browser. Do not send passwords or cookies to the agent.',
-    LOGIN_REQUIRED: 'Finish signing in to Gemini. If a saved session expired, stop the MCP server and run npm run auth -- login.',
+    LOGIN_REQUIRED: 'Finish signing in to Gemini and run npm run auth -- login. The MCP server resumes without restarting.',
     BROWSER_PROFILE_AMBIGUOUS: 'Select your Chrome User Data directory with GEMINI_CHROME_PROFILE. Do not guess between profiles.',
     OPEN_DEFAULT_GEMINI_ACCOUNT: 'Open Gemini with the default Google account (account 0), or use a separate Chrome profile for the intended account.',
     ACCOUNT_MISMATCH: 'The browser account differs from the saved account. Use a separate GEMINI_DATA_DIR for a different account; do not replace existing state.',

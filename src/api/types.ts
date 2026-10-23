@@ -22,6 +22,9 @@ export type RunInfo = {
   operation: 'send' | 'fork-in-place' | 'regenerate';
   base?: Position; turn?: Turn;
   error?: { code: string; message: string };
+  recoveryError?: { code: string; message: string };
+  partial?: { text: string };
+  diagnostics?: { transportError?: string; exhausted: boolean; complete: boolean; receivedChars: number; model?: string };
 };
 export type RunEvent = { id: number; runId: string; type: string; at: string; [key: string]: unknown };
 export type Input = { text: string; files?: string[] };
@@ -41,7 +44,8 @@ export type Generation = {
   input: { text: string; files: Attachment[] };
   baseline: Position[];
 };
-export type Observation = { type: 'position'; position: Position } | { type: 'text.delta' | 'thinking.delta'; delta: string };
+export type Observation = { type: 'position'; position: Position } | { type: 'text.delta' | 'thinking.delta'; delta: string }
+  | { type: 'text.replace'; text: string } | { type: 'diagnostics'; diagnostics: NonNullable<RunInfo['diagnostics']> };
 export type BackendChat = { cid: string; turns: TurnData[] };
 export interface Backend {
   capabilities(accountId?: string): Promise<Capabilities>;

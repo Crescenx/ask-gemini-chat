@@ -18,7 +18,10 @@ export class NativeBackend implements Backend {
     // Grow the native limit rather than silently treating a truncated tail as the
     // whole conversation. Beyond this bound the caller gets an explicit error.
     for (const limit of [20, 80, 320, 1000]) {
-      const turns = parseHistory(await this.api.history(cid, limit));
+      const raw = await this.api.history(cid, limit);
+      const rejection = protocolError(raw);
+      if (rejection) throw new ApiError('UPSTREAM_HISTORY_REJECTED', `Upstream history RPC ${rejection.rpcCode}, BardErrorInfo ${rejection.code ?? 'unspecified'}`, 502);
+      const turns = parseHistory(raw);
       if (turns.some(t => t.position.cid !== cid)) throw new ApiError('UPSTREAM_HISTORY_MISMATCH');
       if (turns.length < limit) return turns;
     }
@@ -39,23 +42,23 @@ export class NativeBackend implements Backend {
     const started = Date.now();
     for (;;) {
       const state = await this.api.poll(id) as any;
-      const parsed = generation(state.raw ?? '') as { text: string; metadata: string[] | null; complete: boolean };
+      const parsed = (state.response ?? generation(state.raw ?? '')) as { text: string; metadata: string[] | null; complete: boolean };
       if (parsed.metadata?.[0] && parsed.metadata[1]) {
         const p = { cid: parsed.metadata[0], rid: parsed.metadata[1], rcid: parsed.metadata[2] };
         if (!samePosition(observed, p)) { observed = p; observe({ type: 'position', position: p }); }
       }
-      // Replacements are possible upstream. Only append genuine prefix deltas;
-      // the final Turn remains authoritative if the upstream revises its text.
       if (parsed.text.startsWith(lastText) && parsed.text.length > lastText.length) observe({ type: 'text.delta', delta: parsed.text.slice(lastText.length) });
+      else if (parsed.text !== lastText) observe({ type: 'text.replace', text: parsed.text });
       lastText = parsed.text;
       if (state.done) {
+        observe({ type: 'diagnostics', diagnostics: { transportError: state.error, exhausted: !!state.exhausted, complete: parsed.complete, receivedChars: state.receivedChars ?? state.raw?.length ?? 0, model: state.model } });
         if (state.error && ['authentication', 'proof'].includes(state.stage)) throw new ApiError('GENERATION_REJECTED', state.error, 401);
-        const rejection = protocolError(state.raw ?? '');
+        const rejection = state.rejection ?? protocolError(state.raw ?? '');
         if (rejection) {
           const code = !observed && rejection.rpcCode === 9 && Number.isInteger(rejection.code) ? 'GENERATION_REJECTED' : 'UPSTREAM_UNCERTAIN';
           throw new ApiError(code, `Upstream RPC ${rejection.rpcCode}, BardErrorInfo ${rejection.code ?? 'unspecified'}`, 502);
         }
-        if (state.error || !state.exhausted || !parsed.complete || !observed) throw new ApiError('UPSTREAM_UNCERTAIN', 'Generation did not reach verified completion');
+        if (state.error || !state.exhausted || !parsed.complete || !observed) throw new ApiError('UPSTREAM_UNCERTAIN', `Generation did not reach verified completion: ${state.error ?? (!state.exhausted ? 'STREAM_NOT_EXHAUSTED' : !parsed.complete ? 'CANDIDATE_INCOMPLETE' : 'POSITION_MISSING')}`);
         if (input.temporary) {
           const position = observed;
           if (!/^c_[a-f0-9]+$/.test(position.cid) || !/^r_[a-f0-9]+$/.test(position.rid) || !/^rc_[a-f0-9]+$/.test(position.rcid ?? '') ||

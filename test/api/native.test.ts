@@ -122,3 +122,28 @@ test('temporary streams reject interruption, incomplete, stale and mismatched re
     await assert.rejects(new NativeBackend({ api: api as any }).generate(input, () => {}), { code: 'UPSTREAM_UNCERTAIN' });
   }
 });
+
+test('text replacements and original transport diagnostics survive an interrupted stream',async()=>{
+  const texts=['[project](https://exa','[project](https://example.com)\n','[project](https://example.com)\nMore'];
+  let index=0,text='';const events:Observation[]=[];
+  const api={start:async()=>request.id,poll:async()=>{
+    const i=Math.min(index++,texts.length-1);
+    return {done:i===2,error:i===2?'RESPONSE_FRAME_SIZE_LIMIT':undefined,receivedChars:1010000,model:'95a4c0abcba24364',
+      response:{text:texts[i],metadata:['c_abcd','r_3','rc_3'],complete:false}};
+  }};
+  // A rewrite removes an earlier Markdown fragment, rather than only appending.
+  texts[0]='[https://example.com](https://exa';
+  await assert.rejects(new NativeBackend({api:api as any,pollMs:1}).generate(request,e=>{
+    events.push(e);if(e.type==='text.delta')text+=e.delta;if(e.type==='text.replace')text=e.text;
+  }),{code:'UPSTREAM_UNCERTAIN',message:'Generation did not reach verified completion: RESPONSE_FRAME_SIZE_LIMIT'});
+  assert.equal(text,texts[2]);assert(events.some(e=>e.type==='text.replace'));
+  const d=events.find(e=>e.type==='diagnostics');
+  assert(d?.type==='diagnostics');assert.equal(d.diagnostics.transportError,'RESPONSE_FRAME_SIZE_LIMIT');
+  assert.equal(d.diagnostics.model,'95a4c0abcba24364');
+});
+
+test('history preserves upstream RPC and Bard error codes',async()=>{
+  const raw=JSON.stringify([['wrb.fr','hNvQHb',null,null,null,[5,null,[['BardErrorInfo',[1167]]]]]])+'\n';
+  const backend=new NativeBackend({api:{history:async()=>raw} as any});
+  await assert.rejects(backend.history('c_abcd'),{code:'UPSTREAM_HISTORY_REJECTED',message:'Upstream history RPC 5, BardErrorInfo 1167'});
+});

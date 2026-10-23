@@ -58,8 +58,11 @@ sign-in. Cookie values stay in the local process and private session file.
 The command validates the session against Gemini over HTTP before returning
 `state: ready`. An already valid saved session avoids Chrome entirely. After a
 successful sync, the connection closes; the user can disable Remote Debugging.
-Subsequent questions and session refreshes use HTTP. If login later expires, stop
-the MCP process and repeat this step.
+Subsequent questions and session refreshes use HTTP. While running, the MCP process
+maintains the session in the background every ten minutes, with backoff for network
+failures. If login later expires, repeat this step; the MCP process can stay running
+and picks up the renewed session without a restart. Keep the session directory on
+a local filesystem so cross-process SQLite locking works reliably.
 
 Chrome's remote-debugging permission grants broader browser access than the few
 read-only commands this helper uses. Explain that permission when asking the user

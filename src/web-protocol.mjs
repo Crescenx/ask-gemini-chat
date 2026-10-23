@@ -26,8 +26,8 @@ export function protocolError(raw){
   }
   return null;
 }
-export function generation(raw){
-  let result={text:'',metadata:null,complete:false};
+export function generation(raw,previous){
+  let result=previous?{...previous}:{text:'',metadata:null,complete:false};
   for(const frame of frames(raw)){
     if(frame[0]!=='wrb.fr'||typeof frame[2]!=='string')continue;
     const body=JSON.parse(frame[2]);

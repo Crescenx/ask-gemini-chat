@@ -1,45 +1,35 @@
 # ask-gemini-chat
 
-A local MCP server for Gemini web chat: ask complex questions, upload files,
-continue conversations, and recover results after a disconnect or process restart.
+> 「我已经厌倦了：“不是而是”，“这不是说”，“不等于”，“不自动等于”， “并不能说” 的gpt式屁话了，正好最有人味的ai gemini发了新argon，希望gpt能直接调用gemini」
 
-**Unofficial and experimental.** This uses Gemini's private web protocol, not the
-Google Gemini API. It needs your own signed-in Google account with access to the
-configured Argon model. Protocol changes, account restrictions, and session expiry
-can interrupt service. This project is not affiliated with Google.
+`ask-gemini-chat` 是一个本地 MCP 服务。它让 GPT / Codex 等客户端直接把问题、本地文件和多轮上下文扔给网页版 Gemini Argon，适合拿来做长文写作、方案讨论或者听取第二意见。
 
-## Install with your agent
+登录时通过浏览器做一次会话确认，后续生成全部走直接的 HTTP 请求。没有页面自动化，不内置本地命令执行，也不开公共端口；模型返回的代码和文本都只作为纯数据处理。
 
-Download this repository, open it in your local coding agent, and say:
+## 安装与配置
 
-> Install and configure ask-gemini-chat for my agent. Follow INSTALL.md and
-> verify that it works. Tell me when I need to sign in or confirm Chrome's connection.
+### 交给 Agent 安装（推荐）
 
-中文也可以直接说：**“按照 INSTALL.md 安装并配置这个工具，需要我登录时告诉我。”**
+把[仓库](https://github.com/Crescenx/ask-gemini-chat)克隆到本地，用你的本地编程 Agent 打开项目目录，直接对它说：
 
-The agent installs dependencies, generates machine-specific MCP settings, checks
-login and the real model, and registers the three tools. You sign in to Gemini in
-your own Chrome and approve one browser connection; no manual cookie copying is
-needed for the normal path. See [INSTALL.md](INSTALL.md) for the complete agent runbook.
+> 按照 INSTALL.md 安装并配置这个工具，需要我登录时告诉我。
 
-## What it exposes
+英文提示：
 
-| Tool | Purpose |
-| --- | --- |
-| `upload_gemini_file` | Upload an authorized local file (absolute path, at most 20 MiB) and return `file_id` |
-| `ask_gemini_chat` | Ask a question, optionally with `file_ids` or an existing `chat_id` |
-| `get_gemini_result` | Poll or recover the original request using `run_id` |
+> Install and configure ask-gemini-chat for my agent. Follow INSTALL.md and verify that it works. Tell me when I need to sign in or confirm Chrome's connection.
 
-Generation uses HTTP. Login optionally reads the user-approved Chrome session.
-There is no page automation, native MCP invocation, local command execution,
-or public HTTP server. Gemini may use its own built-in file analysis and calculation
-features. Returned code and model text are data; this server does not execute them.
+Agent 会自动装好依赖、生成当前机器对应的 MCP 配置、检查登录状态并验证实际的 Argon 模型。你只需要在自己的 Chrome 里登录 Gemini，并在浏览器弹窗时点一次允许连接。完整安装手册见 [INSTALL.md](INSTALL.md)。
 
-## Install from source
+### 手动安装
 
-Requires Node.js **24 or later** and Python **3.10 or later**. Linux/WSL is tested;
-other operating systems have not been verified. Clone or download this repository,
-then run these commands in its root:
+环境要求：
+
+- **Node.js 24+**
+- **Python 3.10+**
+- 拥有预设 **Argon** 模型访问权限的 Google 账号
+- 已在 Linux / WSL 环境测试通过；原生 Windows 与 macOS 尚未验证
+
+在仓库根目录执行：
 
 ```sh
 npm run setup
@@ -50,56 +40,11 @@ npm run check
 npm test
 ```
 
-The Python helper uses pinned `curl_cffi` with a Chrome TLS profile. Setup records the chosen interpreter locally. Without setup or
-`GEMINI_HTTP_PYTHON`, it uses `python3` (`python` on Windows) from PATH. Keep the
-interpreter path absolute when configuring an MCP client. Standard proxy variables
-such as `HTTPS_PROXY` are honored; no machine-specific proxy is enabled by default.
+`npm run setup` 会创建带固定版本 `curl_cffi`（Chrome TLS 指纹）的 Python 环境，并在 `.runtime/mcp.json` 和 `.runtime/codex.toml` 生成包含本机绝对路径的配置文件（不含 Cookie）。未运行 setup 或未配置 `GEMINI_HTTP_PYTHON` 时，默认从 PATH 查找 `python3`（Windows 为 `python`）。程序支持 `HTTPS_PROXY` 等标准代理环境变量。本仓库仅支持从源码运行，未发布到 npm。
 
-## Authenticate
+### MCP 客户端最小配置
 
-Run `npm run auth -- login`. In Chrome 144+, sign in normally at Gemini, enable
-Remote Debugging at `chrome://inspect/#remote-debugging`, and click Allow when
-Chrome asks. The helper reads only the two required session cookies, validates
-them over HTTP and closes the connection. It never asks for passwords or prints
-cookies. You can disable Remote Debugging afterward; normal operation uses HTTP.
-See [login steps and account selection](INSTALL.md#2-sign-in-through-the-users-browser).
-This is local session synchronization, not OAuth.
-
-### Manual fallback (advanced)
-
-If browser discovery is unavailable, explicit cookie import remains supported.
-Sign in at `https://gemini.google.com` using the default Google account in that
-browser profile. In browser developer tools, find the Google cookies named
-`__Secure-1PSID` and `__Secure-1PSIDTS`. Store their values in a private JSON file
-outside the repository, accessible only by you:
-
-```json
-{
-  "__Secure-1PSID": "YOUR_COOKIE_VALUE",
-  "__Secure-1PSIDTS": "YOUR_COOKIE_VALUE"
-}
-```
-
-Import that file (or pipe JSON to `import -`):
-
-```sh
-npm run auth -- import /absolute/private/path/cookies.json
-npm run auth -- status
-```
-
-Import validates the account over HTTP before saving the session. Browser automation
-is not required. `npm run auth -- refresh` refreshes the saved session; if it reports
-`LOGIN_REQUIRED`, stop the MCP server, import fresh cookies, then restart it. Do not
-share cookies, put their values in command-line arguments, or commit session files.
-Delete the temporary export after a successful import. Never submit cookies in issues.
-
-## Configure an MCP client
-
-`npm run setup` produces `.runtime/mcp.json` and `.runtime/codex.toml` with the
-actual absolute paths. Have the agent merge the appropriate entry into its client
-configuration as described in INSTALL.md. These files do not contain cookies.
-
-Example configuration; replace both absolute paths:
+将 `.runtime` 中生成的配置合并到你的客户端，或参考以下最小示例（请将两个路径替换为本机绝对路径）：
 
 ```json
 {
@@ -115,141 +60,114 @@ Example configuration; replace both absolute paths:
 }
 ```
 
-Ensure `node` resolves to Node 24+ in the client's environment; use its absolute
-path if necessary. Set the client's per-tool timeout to at least 180 seconds for
-uploads. Generation is polled in short calls, so the client need not hold a single
-call open for the entire answer. Run from a source checkout; npm-registry installation
-is not provided. The package is marked private to prevent accidental npm publication.
+请确保客户端环境中的 `node` 指向 Node 24+（必要时写绝对路径）。建议将客户端的单次工具调用超时设为至少 180 秒以保证文件上传完成；回答生成采用短轮询，不需要单次连接一直挂着等完全文生成。
 
-## Use
+## 登录与会话维护
 
-Choose the chat mode based on the task:
+执行 `npm run auth -- login` 进行本地会话同步。在 Chrome 144+ 中正常登录 Gemini，打开 `chrome://inspect/#remote-debugging` 开启远程调试，并在 Chrome 弹窗中点击允许（Allow）。脚本仅读取 `__Secure-1PSID` 和 `__Secure-1PSIDTS` 两个必要的会话 Cookie，通过 HTTP 验证后立即断开连接，不会索要密码或打印 Cookie。同步完成后即可关闭远程调试。详见 [登录步骤与账号选择](INSTALL.md#2-sign-in-through-the-users-browser)。
 
-- Use `mode: "normal"` for planned multi-turn discussions, reusable context, or
-  conversations you want to keep in Gemini history.
-- Use `mode: "temporary"` for one-shot answers or conversations that do not need
-  to appear in Gemini history. The agent makes this choice; the server does not
-  guess from the prompt or silently fall back to normal mode.
+如果无法直接连接浏览器，可以使用该浏览器配置的默认 Google 账号登录 [Gemini](https://gemini.google.com) 后，从开发者工具中取出这两个 Cookie，存放在仓库外的私有 JSON 文件中：
 
-Omitting `mode` on a new chat preserves the existing normal behavior. When
-continuing with `chat_id`, omit `mode` to inherit it; explicitly changing it
-returns `CHAT_MODE_MISMATCH`. Results include the effective `mode`.
+```json
+{
+  "__Secure-1PSID": "YOUR_COOKIE_VALUE",
+  "__Secure-1PSIDTS": "YOUR_COOKIE_VALUE"
+}
+```
 
-For a one-shot request:
+然后手动导入并检查状态：
+
+```sh
+npm run auth -- import /absolute/private/path/cookies.json
+npm run auth -- status
+```
+
+导入成功后请删除临时 JSON 文件。
+
+**后台保活与重连：**
+
+MCP 进程运行期间，会在启动时及之后每 10 分钟通过 HTTP 检查并维护一次会话，期间不访问或控制浏览器，也不发送生成请求。遇到临时网络故障会按 1 分钟到 1 小时的退避策略静默重试；客户端关闭或电脑休眠时维护暂停。若后台提示登录失效，或手动执行 `npm run auth -- refresh` 报 `LOGIN_REQUIRED`，重新运行 `npm run auth -- login` 即可恢复，无需重启 MCP 服务。
+
+## MCP 工具与用法
+
+服务仅公开三个工具：
+
+| 工具名 | 用途 |
+| --- | --- |
+| `upload_gemini_file` | 上传本地文件（需绝对路径，单文件最大 20 MiB），返回 `file_id` |
+| `ask_gemini_chat` | 提问，可附带 `file_ids` 或传入已有 `chat_id` 继续对话 |
+| `get_gemini_result` | 传入 `run_id` 轮询生成进度或恢复中断前的请求结果 |
+
+单次提问最多支持 8 个附件、120,000 字符提示词。`wait_ms` 取值范围为 `0` 到 `25000`（默认 `20000`）。
+
+### 正常聊天与临时聊天
+
+调用 `ask_gemini_chat` 时由 Agent 指定 `mode`：
+
+- `mode: "normal"`（默认）：正常聊天，保留在 Google 的 Gemini 网页历史中，适合多轮深入讨论、长上下文复用，支持中断后从网页端历史核对并恢复结果。
+- `mode: "temporary"`：临时聊天，不写入 Google 网页历史，适合一次性提问。支持携带附件、轮询结果以及凭保存的 `chat_id` 追问。
+
+传入 `chat_id` 追问时省略 `mode` 即可自动继承原模式；强行修改模式会返回 `CHAT_MODE_MISMATCH`。
+
+需要注意：`temporary` 仅控制不留 Google 网页历史，**本地数据库依然会保存提示词、回答、附件引用和请求 ID**，以便处理轮询、追问和去重。此外，临时聊天无法靠网页历史找回——如果流式响应中途断开且未能完整落盘，状态会变为 `uncertain` 并返回 `TEMPORARY_RESULT_UNRECOVERABLE`。此时不要继续轮询，也不要向该临时会话追加新问题。
+
+### 调用示例
+
+一次性临时提问：
 
 ```json
 {"request_id":"quick-check-1","mode":"temporary","prompt":"Compute 23 + 48.","wait_ms":20000}
 ```
 
-Temporary chats support attachments, polling, duplicate-request replay, and
-continuation using their saved `chat_id`. They do not support the internal
-fork/edit/regenerate/select operations. Google history is unavailable for these
-chats: completion requires a fully consumed response stream with a completed
-candidate and valid turn IDs. An interrupted response that was not saved in full
-remains `uncertain` with `TEMPORARY_RESULT_UNRECOVERABLE`; stop polling and report
-the unknown outcome instead of resubmitting it. An incomplete temporary chat
-cannot accept another question. Completed local results remain retrievable
-after a server restart.
-
-Temporary mode controls **Gemini history**, not local storage. Local prompts,
-answers, attachment references and request IDs are still stored for polling,
-continuation and deduplication. It is not a zero-retention or logged-out mode.
-
-Upload a file:
+上传文件并开始正常多轮对话：
 
 ```json
 {"request_id":"upload-orders-1","path":"/absolute/path/orders.csv"}
 ```
 
-Ask with the returned file ID:
-
 ```json
 {"request_id":"question-1","mode":"normal","prompt":"Compute the totals and explain the rules.","file_ids":["RETURNED_FILE_ID"],"wait_ms":20000}
 ```
 
-If the answer is still `running`, call `get_gemini_result`:
+如果长思考或复杂计算较慢、返回状态为 `running`，使用原 `run_id` 调用 `get_gemini_result` 继续等待：
 
 ```json
 {"run_id":"RETURNED_RUN_ID","wait_ms":20000}
 ```
 
-For a follow-up, call `ask_gemini_chat` with the returned `chat_id`, a new question,
-and a new `request_id`. Up to eight files and 120,000 prompt characters are accepted.
-`wait_ms` ranges from 0 to 25,000 (default 20,000).
+追问时继续调用 `ask_gemini_chat`，带上返回的 `chat_id`、新问题和新的 `request_id`。
 
-**Keep the same request ID and arguments when retrying an interrupted tool call.**
-Changing its arguments produces `IDEMPOTENCY_CONFLICT`. A result marked `uncertain`
-means completion is unknown: query its original run for a normal chat; do not
-submit a new question to recover it. Normal-chat recovery checks exact upstream
-turn IDs, prompt and parent context. Temporary uncertain results cannot be
-recovered from upstream history. A normal `completed` result confirms committed
-upstream output; a temporary `completed` result confirms a fully received final
-response. Neither confirms the correctness of its content; Google can also
-return error prose as a completed answer.
+**重试与去重规则：**
 
-## Local storage
+网络波动或调用中断需要重试时，**必须保持相同的 `request_id` 和完全一致的参数**，以避免触发模型重复生成；同一个 `request_id` 改参数会报 `IDEMPOTENCY_CONFLICT`。当正常聊天返回 `uncertain` 时，请按原 `run_id` 查询恢复，不要重新发一条新提问。
 
-By default, session and SQLite state are stored under
-`~/.local/share/ask-gemini-chat/`, independently of the working directory.
+生成中或中断后，工具会通过 `partial.text` 提供已收到的最新正文，并标记 `partial.complete: false`。这份文字可能继续修改；完整结果使用 `completed` 状态和 `text` 字段。历史查询失败时，原请求与部分正文仍会返回，`recovery_error` 保留具体错误。`diagnostics` 记录传输错误、流完成状态、累计接收字符数和上游返回的模型标识，便于定位故障。
 
-| Environment variable | Override |
+## 本地存储与隐私
+
+会话凭据与 SQLite 状态默认保存在 `~/.local/share/ask-gemini-chat/`，与当前工作目录无关。可通过环境变量覆盖（需使用绝对路径）：
+
+| 环境变量 | 作用 |
 | --- | --- |
-| `GEMINI_DATA_DIR` | Directory containing `session.json` and `state.sqlite` |
-| `GEMINI_SESSION_FILE` | Session file path |
-| `WEBCHAT_DATABASE` | SQLite database path |
-| `GEMINI_HTTP_PYTHON` | Python executable with the HTTP dependency installed |
+| `GEMINI_DATA_DIR` | 包含 `session.json` 和 `state.sqlite` 的数据目录 |
+| `GEMINI_SESSION_FILE` | 会话文件路径 |
+| `WEBCHAT_DATABASE` | SQLite 数据库文件路径 |
+| `GEMINI_HTTP_PYTHON` | 安装了 HTTP 依赖的 Python 解释器路径 |
 
-Use absolute override paths. Files contain credentials, conversation text and
-attachment references. Uploads and prompts go to Google. One process may open a
-database at a time: a second client using it receives `DATABASE_LOCKED`. Independent
-clients need separate data directories and authentication. Keep the database to
-preserve request deduplication and conversation continuity; removing it loses that
-recovery information. Stop the server before changing or deleting its files.
+同一数据库同时只允许一个 MCP 服务端进程打开；第二个进程会收到 `DATABASE_LOCKED`。多客户端独立运行请配置不同的数据目录。登录凭据的并发更新由会话文件旁的私有 SQLite 锁串行化，请将会话目录放在本地文件系统。修改或删除本地数据文件前请先停止 MCP 服务。
 
-## Validation and scope
+安全提醒：你的提示词和上传的文件会发送给 Google；本地数据目录包含登录凭据与聊天记录原文。请勿在命令行参数中直接传入 Cookie、将凭据提交到代码库或在 Issue 中上传会话文件与数据库。
 
-`npm run doctor` checks installation, tool discovery and authentication separately.
-`npm run verify` checks a real answer and actual model identity, preserving the
-same request across retries.
+## 协议限制与验证状态
 
-`npm test` uses synthetic fixtures, a local HTTP server, and the real MCP SDK. It
-needs the Python helper but no Google credentials or external model calls. Tests
-cover upload bounds, MIME types, streaming, deduplication, continuation, process
-interruption recovery, and explicit errors. `npm run check` type-checks TypeScript.
-GitHub Actions runs both with an isolated Python environment.
+本项目基于 Gemini 的非官方私有网页协议实现，与 Google 无关，也不提供官方 API 回退或自动切模型。上游协议变更、风控策略或会话过期都可能影响可用性。
 
-The source implementation was verified on 2026-10-23 with CSV and rules attachments,
-weighted projection calculations, a follow-up, and a server restart/replay. Both
-rounds were confirmed from upstream history as Argon (`95a4c0abcba24364`); they took
-about 232 and 333 seconds. This extracted package is separately checked with local
-tests; private transcripts, credentials and live experiment artifacts are not
-included. No multi-account or long-term availability guarantee is implied.
+当前版本已通过 TypeScript 类型检查与 64 项本地测试，覆盖上传限制、流式解析、幂等去重、多轮追问、进程恢复、跨进程锁与后台维护。真实 Argon（`95a4c0abcba24364`）验证涵盖附件计算、正常与临时聊天、README 写作、80 条长输出，以及 MCP 服务重启后的结果读取和同 ID 去重。
 
-The standalone installer was also verified on 2026-10-23 in a clean source copy:
-setup created its own Python environment, type-checking and 42 tests passed, and
-doctor correctly distinguished missing authentication from working MCP transport.
-On WSL, Chrome discovery and read-only synchronization were verified against an
-already-authorized browser connection. The new `verify` command received a correct
-real answer and confirmed Argon from history; rerunning reused its saved success.
-A fresh Chrome permission dialog and native macOS/Windows installs were not tested.
+后台维护已通过一次 602 秒空闲后的真实 HTTP 验证。跨天保活和 Cookie 有效期延长仍待验证。
 
-Normal and temporary modes were verified through the standalone stdio entrypoint
-on 2026-10-23. Live checks covered a temporary CSV attachment question, retrieval
-after a server restart, continuation without reattaching the file, ordinary
-multi-turn context, duplicate-request replay, and mode-conflict rejection.
-The response streams identified Argon (`95a4c0abcba24364`); temporary calls made no
-upstream history queries. Type-checking and 50 tests passed, including simulated
-interrupted temporary streams and process restarts. Long-term temporary-context
-expiry was not tested. Private live evidence is excluded from the repository.
+## 开源协议与贡献
 
-The shared state/backend implementation retains internal revision and history
-operations so existing recovery invariants stay intact. Only the three tools above
-are public. There is no official Google API fallback or automatic model substitution.
-The upstream request budget is 30 minutes, with additional history recovery time.
+本项目基于 MIT 协议开源，详见 [LICENSE](LICENSE) 与第三方依赖说明 [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md)。
 
-## Contributing and licensing
-
-MIT; see [LICENSE](LICENSE) and [dependency notices](THIRD_PARTY_NOTICES.md).
-Please include a synthetic reproduction and a test with changes. Before reporting
-a bug, remove cookies, tokens, prompts, file contents and account identifiers.
-Do not upload raw session files, databases or captured network traffic.
+欢迎提交 PR（请附带脱敏的合成复现用例与测试）。提交 Issue 或反馈问题前，请务必清理所有 Cookie、Token、账号标识、私有文件路径及聊天内容。

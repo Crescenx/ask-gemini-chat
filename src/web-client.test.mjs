@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import {WebAPI,GENERATION_TIMEOUT_MS,GENERATION_WAIT_MS} from './web-client.mjs';
+import {WebAPI,GENERATION_TIMEOUT_MS,GENERATION_WAIT_MS,MAX_RESPONSE_FRAME_CHARS} from './web-client.mjs';
 import {ARGON,generation} from './web-protocol.mjs';
 
 const session={cookies:{'__Secure-1PSID':'private-cookie'},accessToken:'private-csrf',build:'build',sessionId:'session',pushId:'push'};
@@ -89,4 +89,48 @@ test('temporary mode changes only its wire flag and participates in request dedu
   await assert.rejects(api.start({...input,temporary:false}),/REQUEST_ID_CONFLICT/);
   await assert.rejects(api.start({...input,id:'invalid',temporary:'yes'}),/INVALID_CHAT_MODE/);
   assert.equal(bodies.length,2);
+});
+
+test('long cumulative streams retain bounded latest snapshots, UTF-8 and metadata trailers',async()=>{
+  const answer='中文 😀 '.repeat(1000);
+  const model=Array(40).fill(null);model[39]=ARGON;
+  const modelFrame=JSON.stringify([['wrb.fr',null,JSON.stringify(model)]])+'\n';
+  const trailer=JSON.stringify([['wrb.fr',null,JSON.stringify([null,['c_abc','r_abc']])]])+'\n';
+  let part=0;
+  const api=new WebAPI({auth,fetchImpl:async()=>new Response(new ReadableStream({pull(controller){
+    if(part++===0){controller.enqueue(new TextEncoder().encode(modelFrame));return;}
+    if(part<=250){controller.enqueue(new TextEncoder().encode(frame.replace('answer',answer)));return;}
+    if(part===251){
+      const bytes=new TextEncoder().encode(frame.replace('answer',answer+'尾声'));
+      const split=bytes.indexOf(0xe5);
+      controller.enqueue(bytes.slice(0,split+1));controller.enqueue(bytes.slice(split+1));return;
+    }
+    if(part===252){controller.enqueue(new TextEncoder().encode(trailer));return;}
+    controller.close();
+  }}))});
+  await api.start({id:'long-stream',prompt:'fixture'});
+  const s=await done(api,'long-stream');
+  assert.equal(s.error,undefined);assert(s.exhausted);assert(s.receivedChars>1000000);
+  assert.equal(s.response.text,answer+'尾声');assert.equal(s.response.complete,true);
+  assert.deepEqual(s.response.metadata,['c_abc','r_abc','rc_abc']);assert.equal(s.model,ARGON);
+  assert(s.raw.length<1000);
+});
+
+test('stream errors retain partial text and do not let cleanup hide the original cause',async()=>{
+  const errorFrame=JSON.stringify([['wrb.fr',null,null,null,null,[9,null,[['BardErrorInfo',[1097]]]]]])+'\n';
+  for(const [name,tail,expected] of [
+    ['oversized','['+' '.repeat(MAX_RESPONSE_FRAME_CHARS),'RESPONSE_FRAME_SIZE_LIMIT'],
+    ['malformed','[["truncated"','INVALID_STREAM_FRAME'],
+    ['rejection',errorFrame+'[["e",4]]\n',undefined],
+  ]){
+    let index=0;
+    const api=new WebAPI({auth,fetchImpl:async()=>new Response(new ReadableStream({
+      pull(c){if(index++===0)c.enqueue(new TextEncoder().encode(frame));else if(index===2)c.enqueue(new TextEncoder().encode(tail));else c.close();},
+      cancel(){throw Error('cleanup failed');},
+    }))});
+    await api.start({id:name,prompt:'fixture'});const s=await done(api,name);
+    assert.equal(s.error,expected);assert.equal(s.response.text,'answer');
+    if(name==='rejection'){assert(s.exhausted);assert.deepEqual(s.rejection,{rpcCode:9,code:1097});}
+    else assert(!s.exhausted);
+  }
 });

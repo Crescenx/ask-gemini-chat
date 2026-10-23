@@ -8,6 +8,7 @@ import { InMemoryTransport } from '@modelcontextprotocol/sdk/inMemory.js';
 import { createAgentMcpServer } from '../../src/api/agent-mcp.ts';
 import { MAX_FILE_BYTES } from '../../src/upload-limits.mjs';
 import { ApiService } from '../../src/api/service.ts';
+import { ApiError } from '../../src/api/types.ts';
 import { Remote, until } from './helpers.ts';
 
 async function setup(t: any) {
@@ -59,6 +60,25 @@ test('slow and uncertain answers keep their original run and recover only by his
   const recovered = await call('get_gemini_result', { run_id: first.run_id, wait_ms: 0 });
   assert.equal(recovered.status, 'completed'); assert.equal(recovered.text, 'reply:slow hello');
   assert.equal(backend.generations.length, 1);
+});
+
+test('failed history recovery returns the original run, corrected partial text and both errors',async t=>{
+  const {backend,service,call}=await setup(t);
+  let calls=0;
+  backend.generate=async(_input,observe)=>{
+    calls++;observe({type:'text.delta',delta:'broken link'});
+    observe({type:'text.replace',text:'[project](https://example.com)'});
+    observe({type:'text.delta',delta:'\nNext paragraph'});
+    throw new ApiError('UPSTREAM_UNCERTAIN','HTTP_TRANSPORT_ERROR');
+  };
+  backend.recover=async()=>{throw new ApiError('UPSTREAM_HISTORY_REJECTED','Upstream history RPC 5, BardErrorInfo 1167');};
+  const first=await call('ask_gemini_chat',{request_id:'partial',prompt:'fixture',wait_ms:1000});
+  const r=await call('get_gemini_result',{run_id:first.run_id,wait_ms:0});
+  assert.equal(r.isError,false);assert.equal(r.run_id,first.run_id);assert.equal(r.status,'uncertain');
+  assert.equal(r.text,undefined);assert.equal(r.partial.complete,false);
+  assert.equal(r.partial.text,'[project](https://example.com)\nNext paragraph');
+  assert.equal(r.error.message,'HTTP_TRANSPORT_ERROR');assert.match(r.recovery_error.message,/1167/);
+  assert.equal(service.getRun(r.run_id).partial?.text,r.partial.text);assert.equal(calls,1);
 });
 
 test('agent chooses a fixed chat mode; temporary retries, polling and continuation never fetch history', async t => {

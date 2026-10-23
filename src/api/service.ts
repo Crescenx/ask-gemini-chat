@@ -220,8 +220,15 @@ export class ApiService {
     try {
       const turn = await this.backend.generate(run.generation, event => {
         if (this.closed) return;
-        if (event.type === 'position') { run = this.store.get<RunRecord>('runs', run.id)!; run.observed = event.position; this.store.put('runs', run.id, run); }
-        else this.store.event(run.id, event.type, { delta: event.delta });
+        run = this.store.get<RunRecord>('runs', run.id)!;
+        if (event.type === 'position') { run.observed = event.position; this.store.put('runs', run.id, run); }
+        else {
+          if (event.type === 'text.delta') run.partial = { text: (run.partial?.text ?? '') + event.delta };
+          if (event.type === 'text.replace') run.partial = { text: event.text };
+          if (event.type === 'diagnostics') run.diagnostics = event.diagnostics;
+          const { type, ...data } = event;
+          this.store.transaction(() => { this.store.put('runs', run.id, run); this.store.event(run.id, type, data); });
+        }
       });
       if (!this.closed) this.finish(run, turn);
     } catch (error) {
@@ -240,7 +247,7 @@ export class ApiService {
     if (this.store.list<{ runId: string; status: string }>('toolCalls').some(c => c.runId === run.id && c.status !== 'completed')) throw new ApiError('EXECUTION_UNCERTAIN', 'Tool execution must be reconciled before completion');
     const chat = this.chat(run.chatId);
     if (chat.busy !== run.id) fail('CHAT_CHANGED');
-    run.status = 'completed'; run.turn = this.asTurn(chat.id, turn); delete run.error;
+    run.status = 'completed'; run.turn = this.asTurn(chat.id, turn); delete run.error; delete run.recoveryError; delete run.partial;
     chat.upstream = { cid: turn.position.cid }; chat.head = turn.position; chat.observedHead = turn.position; delete chat.busy; chat.revision++;
     this.store.transaction(() => {
       if (run.operation === 'regenerate' && run.generation.at) {
@@ -257,8 +264,13 @@ export class ApiService {
     return this.locked(info.chatId, async () => {
       const run = this.store.get<RunRecord>('runs', id)!;
       if (run.status !== 'uncertain' || run.temporary) return this.getRun(id);
-      const turn = await this.backend.recover(run.generation, run.observed);
+      let turn;
+      try { turn = await this.backend.recover(run.generation, run.observed); delete run.recoveryError; }
+      catch (error) {
+        run.recoveryError = error instanceof ApiError ? { code: error.code, message: error.message } : { code: 'RECOVERY_FAILED', message: 'History lookup failed; the original request and partial text are retained' };
+      }
       if (turn) this.finish(run, turn);
+      else this.store.put('runs', run.id, run);
       return this.getRun(id);
     });
   }

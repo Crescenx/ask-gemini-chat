@@ -23,9 +23,13 @@ export function createAgentMcpServer(service: ApiService, { localFiles = false }
       run_id: run.id, chat_id: run.chatId, status: run.status, mode: run.temporary ? 'temporary' : 'normal',
       ...(run.turn ? { text: run.turn.output.text, position: run.turn.position } : {}),
       ...(run.error ? { error: run.error } : {}),
+      ...(run.recoveryError ? { recovery_error: run.recoveryError } : {}),
+      ...(run.partial ? { partial: { ...run.partial, complete: false } } : {}),
+      ...(run.diagnostics ? { diagnostics: run.diagnostics } : {}),
       ...(['running', 'waiting_tool', 'uncertain'].includes(run.status) ? {
         next: run.temporary && run.status === 'uncertain'
           ? 'Stop polling: this temporary response cannot be recovered from upstream history. Do not resubmit or change request_id to retry; report the unknown outcome.'
+          : run.recoveryError ? 'History lookup failed. Retain this run_id and the explicitly incomplete partial text. Retry get_gemini_result later; do not send another ask or change request_id.'
           : 'Call get_gemini_result with this run_id. Do not submit a new ask or change request_id to retry.',
       } : {}),
     }, run.status === 'failed');
@@ -50,7 +54,7 @@ export function createAgentMcpServer(service: ApiService, { localFiles = false }
     return poll(run, args.wait_ms);
   }));
   server.registerTool('get_gemini_result', {
-    description: 'Retrieve the original Gemini answer by run_id, including saved results after reconnecting. Repeat while running. For uncertain normal chats, checks upstream history without sending another prompt. An uncertain temporary chat has no upstream history recovery: stop polling and report the unknown outcome. Never resubmit as a new ask.',
+    description: 'Retrieve the original Gemini answer by run_id, including saved results after reconnecting. Repeat while running. Partial text is marked partial.complete=false and may be revised; only completed text is final. For uncertain normal chats, checks upstream history without sending another prompt; a recovery_error preserves the original run and partial text. An uncertain temporary chat has no upstream history recovery: stop polling and report the unknown outcome. Never resubmit as a new ask.',
     inputSchema: z.object({ run_id: id, wait_ms: wait }).strict(),
     annotations: { readOnlyHint: true, destructiveHint: false, idempotentHint: true, openWorldHint: true },
   }, safe(async args => poll(await service.refresh(args.run_id), args.wait_ms)));
