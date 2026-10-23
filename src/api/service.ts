@@ -27,6 +27,8 @@ export class ApiService {
   backend: Backend;
   closed = false;
   private locks = new Map<string, Promise<void>>();
+  private generating = 0;
+  get active() { return this.locks.size > 0 || this.generating > 0; }
   constructor(options: { database: string; backend: Backend }) {
     this.store = new Store(options.database); this.backend = options.backend;
     this.store.transaction(() => {
@@ -225,6 +227,7 @@ export class ApiService {
     return this.getRun(id);
   }
   private async execute(run: RunRecord) {
+    this.generating++;
     try {
       const turn = await this.backend.generate(run.generation, event => {
         if (this.closed) return;
@@ -249,7 +252,7 @@ export class ApiService {
         this.store.put('runs', run.id, run); this.store.event(run.id, `run.${run.status}`, { error: run.error });
         if (run.status === 'failed') { const chat = this.chat(run.chatId); delete chat.busy; chat.revision++; this.store.put('chats', chat.id, chat); }
       });
-    }
+    } finally { this.generating--; }
   }
   private finish(run: RunRecord, turn: TurnData) {
     if (this.store.list<{ runId: string; status: string }>('toolCalls').some(c => c.runId === run.id && c.status !== 'completed')) throw new ApiError('EXECUTION_UNCERTAIN', 'Tool execution must be reconciled before completion');

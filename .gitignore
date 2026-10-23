@@ -4,6 +4,8 @@ node_modules/
 .env.*
 !.env.example
 *.sqlite*
+*.mcp.json
+*.mcp.log
 *.lock
 !package-lock.json
 *cookie*.json

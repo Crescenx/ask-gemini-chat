@@ -1,29 +1,25 @@
 #!/usr/bin/env node
+import { Server } from '@modelcontextprotocol/sdk/server/index.js';
 import { StdioServerTransport } from '@modelcontextprotocol/sdk/server/stdio.js';
-import { databaseFile } from '../src/config.mjs';
-import { NativeBackend } from '../src/api/native.ts';
-import { ApiService } from '../src/api/service.ts';
-import { createAgentMcpServer } from '../src/api/agent-mcp.ts';
-import { startSessionKeepalive } from '../src/session-keepalive.mjs';
+import { CallToolRequestSchema, ListToolsRequestSchema } from '@modelcontextprotocol/sdk/types.js';
+import { databaseFile, projectDirectory } from '../src/config.mjs';
+import { sharedClient, sourceRevision } from '../src/api/shared-runtime.ts';
+import { runtimeConfiguration } from '../src/api/runtime-config.ts';
 
-const backend = new NativeBackend();
-const service = new ApiService({ database: databaseFile, backend });
-const server = createAgentMcpServer(service, { localFiles: true });
-const stopKeepalive = startSessionKeepalive(backend.api.auth, { notify: (state: string) => {
-  console.error(JSON.stringify({ auth: state, ...(state === 'ready' ? {} : { next: 'Run npm run auth -- login in the installation directory; the server resumes without restarting. Use the saved account.' }) }));
-} });
-let stopped = false;
-const stop = async () => {
-  if (stopped) return;
-  stopped = true;
-  await stopKeepalive();
-  service.close();
-  await server.close();
-  process.exit(0);
-};
-server.server.onclose = () => { void stop(); };
+const call = sharedClient({ database: databaseFile, root: projectDirectory, configuration: runtimeConfiguration() });
+const server = new Server({ name: 'ask-gemini-chat', version: '0.1.0' }, { capabilities: { tools: { listChanged: true } } });
+server.setRequestHandler(ListToolsRequestSchema, request => call('tools/list', request.params));
+server.setRequestHandler(CallToolRequestSchema, request => call('tools/call', request.params));
+let revision = sourceRevision(projectDirectory);
+const timer = setInterval(() => {
+  try {
+    const next = sourceRevision(projectDirectory);
+    if (revision !== next) { revision = next; void server.notification({ method: 'notifications/tools/list_changed' }).catch(() => {}); }
+  } catch { /* Retry after the source update finishes. */ }
+}, 1000);
+timer.unref();
+const stop = async () => { clearInterval(timer); await server.close(); process.exit(0); };
 process.stdin.once('end', () => { void stop(); });
 process.once('SIGINT', () => { void stop(); });
 process.once('SIGTERM', () => { void stop(); });
-// Gemini decides input capacity; the SDK's default 10 MiB message cap is local.
 await server.connect(new StdioServerTransport(process.stdin, process.stdout, { maxBufferSize: Infinity }));

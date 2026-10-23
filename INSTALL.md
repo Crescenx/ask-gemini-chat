@@ -146,6 +146,11 @@ stdio process requires a different deployment; do not claim local registration w
 
 Refresh/restart the MCP connection using the client's supported mechanism and
 confirm it lists `ask_gemini_chat`, `get_gemini_result`, and `upload_gemini_file`.
+Multiple stdio clients with the same configuration now share one local background
+service and database. On the first upgrade from a direct-database server, let its
+active requests finish, stop that old server, and reconnect the clients once.
+Later business-source updates reload at idle without closing client connections;
+changes to the stdio entrypoint or client configuration still require reconnection.
 If this session cannot reload tools, report that a new client session is required;
 local SDK verification does not prove the current agent has loaded the tools.
 
