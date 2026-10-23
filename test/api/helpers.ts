@@ -1,5 +1,5 @@
 import { randomUUID } from 'node:crypto';
-import type { Backend, BackendChat, Generation, Position, TurnData } from '../../src/api/types.ts';
+import type { Backend, BackendChat, Generation, Position, TurnData, UploadSource } from '../../src/api/types.ts';
 
 export const position = (cid: string, n: number): Position => ({ cid, rid: `r_${n.toString(16)}`, rcid: `rc_${n.toString(16)}` });
 export const turn = (cid: string, n: number, text: string, files: unknown[] = []): TurnData => ({
@@ -20,7 +20,7 @@ export class Remote implements Backend {
   archived = new Map<string, TurnData>();
   async capabilities() { return { models: ['argon'], send: true, fork: true, regenerate: true, select: true, nativeMcp: this.tools }; }
   async history(cid: string) { return structuredClone(this.paths.get(cid) ?? []); }
-  async upload(bytes: Uint8Array, name: string) { return { name, reference: `fixture:${randomUUID()}`, size: bytes.length }; }
+  async upload(bytes: UploadSource, name: string) { return { name, reference: `fixture:${randomUUID()}`, size: bytes instanceof Uint8Array ? bytes.length : bytes.size }; }
   async generate(input: Generation, observe: (event: any) => void) {
     this.generations.push(structuredClone(input));
     await this.gate;

@@ -1,8 +1,8 @@
-import { WebAPI, GENERATION_WAIT_MS } from '../web-client.mjs';
+import { WebAPI } from '../web-client.mjs';
 import { frames, generation, protocolError } from '../web-protocol.mjs';
-import { attachmentFields, operationFields, parseHistory } from './protocol.ts';
+import { attachmentFields, operationFields, parseHistoryPage } from './protocol.ts';
 import { ApiError, canonical, samePosition } from './types.ts';
-import type { Attachment, Backend, BackendChat, Generation, Observation, Position, TurnData } from './types.ts';
+import type { Attachment, Backend, BackendChat, Generation, Observation, Position, TurnData, UploadSource } from './types.ts';
 
 export class NativeBackend implements Backend {
   api: WebAPI;
@@ -15,22 +15,35 @@ export class NativeBackend implements Backend {
   }
   async history(cid: string, accountId = 'default'): Promise<TurnData[]> {
     this.account(accountId);
-    // Grow the native limit rather than silently treating a truncated tail as the
-    // whole conversation. Beyond this bound the caller gets an explicit error.
-    for (const limit of [20, 80, 320, 1000]) {
-      const raw = await this.api.history(cid, limit);
+    const pages: TurnData[][] = [], cursors = new Set<string>(), positions = new Set<string>();
+    let cursor: string | null = null;
+    for (;;) {
+      const raw = await this.api.history(cid, 20, cursor);
       const rejection = protocolError(raw);
       if (rejection) throw new ApiError('UPSTREAM_HISTORY_REJECTED', `Upstream history RPC ${rejection.rpcCode}, BardErrorInfo ${rejection.code ?? 'unspecified'}`, 502);
-      const turns = parseHistory(raw);
+      const { turns, nextPageToken } = parseHistoryPage(raw);
       if (turns.some(t => t.position.cid !== cid)) throw new ApiError('UPSTREAM_HISTORY_MISMATCH');
-      if (turns.length < limit) return turns;
+      for (const turn of turns) {
+        const key = canonical(turn.position);
+        if (positions.has(key)) throw new ApiError('UPSTREAM_HISTORY_CHANGED');
+        positions.add(key);
+      }
+      pages.push(turns);
+      if (!nextPageToken) return pages.reverse().flat();
+      if (cursors.has(nextPageToken)) throw new ApiError('UPSTREAM_HISTORY_INVALID_CURSOR');
+      cursors.add(nextPageToken); cursor = nextPageToken;
     }
-    throw new ApiError('HISTORY_LIMIT', 'Conversation exceeds the supported history window');
   }
-  async upload(bytes: Uint8Array, name: string, accountId = 'default'): Promise<Attachment> {
+  async upload(bytes: UploadSource, name: string, accountId = 'default'): Promise<Attachment> {
     this.account(accountId);
-    const [reference] = await this.api.upload([{ name, base64: Buffer.from(bytes).toString('base64') }]);
-    return { name, reference, size: bytes.length };
+    try {
+      const [reference] = await this.api.upload([bytes instanceof Uint8Array ? { name, bytes } : { name, path: bytes.path }]);
+      return { name, reference, size: bytes instanceof Uint8Array ? bytes.length : bytes.size };
+    } catch (error) {
+      const status = error instanceof Error && /^HTTP_(400|401|403|413|415|429)$/.exec(error.message);
+      if (status) throw new ApiError('UPLOAD_REJECTED', `Upstream upload HTTP ${status[1]}`, Number(status[1]));
+      throw error;
+    }
   }
   async generate(input: Generation, observe: (event: Observation) => void): Promise<TurnData> {
     this.account(input.accountId);
@@ -39,8 +52,7 @@ export class NativeBackend implements Backend {
     const fields = operationFields(input.operation, input.operation === 'send' ? input.parent : input.at, input.parent);
     const id = await this.api.start({ id: input.id, prompt: input.input.text, metadata: fields.metadata, files: input.input.files.map(attachmentFields), temporary: input.temporary, ...(fields.operationFlag === undefined ? {} : { operationFlag: fields.operationFlag }) });
     let lastText = '', observed: Position | undefined;
-    const started = Date.now();
-    for (;;) {
+    try { for (;;) {
       const state = await this.api.poll(id) as any;
       const parsed = (state.response ?? generation(state.raw ?? '')) as { text: string; metadata: string[] | null; complete: boolean };
       if (parsed.metadata?.[0] && parsed.metadata[1]) {
@@ -72,9 +84,8 @@ export class NativeBackend implements Backend {
         if (!recovered) throw new ApiError('UPSTREAM_UNCERTAIN', 'Completed stream has no matching committed history');
         return recovered;
       }
-      if (Date.now() - started > GENERATION_WAIT_MS) throw new ApiError('UPSTREAM_UNCERTAIN', 'Generation wait expired; request was not resubmitted');
       await new Promise(r => setTimeout(r, this.pollMs));
-    }
+    } } finally { this.api.release?.(id); }
   }
   async recover(input: Generation, observed?: Position): Promise<TurnData | null> {
     if (input.temporary) return null;

@@ -19,10 +19,14 @@ export function attachmentFields(file: Attachment): unknown[] {
 }
 
 export function parseHistory(raw: string): TurnData[] {
+  return parseHistoryPage(raw).turns;
+}
+
+export function parseHistoryPage(raw: string): { turns: TurnData[]; nextPageToken: string | null } {
   for (const frame of frames(raw)) {
     if (frame[0] !== 'wrb.fr' || frame[1] !== 'hNvQHb' || typeof frame[2] !== 'string') continue;
     const data = JSON.parse(frame[2]);
-    return (data?.[0] ?? []).map((row: any): TurnData | null => {
+    const turns = (data?.[0] ?? []).map((row: any): TurnData | null => {
       const candidates = row?.[3]?.[0] ?? [];
       const chosen = row?.[3]?.[3];
       const c = candidates.find((v: any) => v[0] === chosen) ?? candidates[0];
@@ -39,6 +43,9 @@ export function parseHistory(raw: string): TurnData[] {
         versions: candidates.map((v: any) => ({ cid, rid, rcid: v[0] })),
       };
     }).filter(Boolean).reverse();
+    const nextPageToken = data?.[1] || null;
+    if (nextPageToken !== null && typeof nextPageToken !== 'string') throw new ApiError('UPSTREAM_HISTORY_INVALID_CURSOR');
+    return { turns, nextPageToken };
   }
   throw new ApiError('UPSTREAM_HISTORY_UNAVAILABLE', 'No history response', 502);
 }

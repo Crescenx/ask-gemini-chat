@@ -4,6 +4,7 @@ import { mkdtemp, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { ApiService } from '../../src/api/service.ts';
+import { ApiError } from '../../src/api/types.ts';
 import { Remote, turn, until } from './helpers.ts';
 
 async function setup(t: any) {
@@ -14,6 +15,13 @@ async function setup(t: any) {
   t.after(async () => { service.close(); await rm(dir, { recursive: true, force: true }); });
   return { backend, database, get service() { return service; }, restart() { service.close(); service = new ApiService({ database, backend }); return service; } };
 }
+
+test('explicit upload rejection preserves its upstream status across retries and restart', async t => {
+  const x = await setup(t); let uploads = 0;
+  x.backend.upload = async () => { uploads++; throw new ApiError('UPLOAD_REJECTED', 'Upstream upload HTTP 413', 413); };
+  const check = () => assert.rejects(x.service.upload(Buffer.from('fixture'), 'file.txt', 'default', 'same'), { code: 'UPLOAD_REJECTED', status: 413, message: 'Upstream upload HTTP 413' });
+  await check(); await check(); x.restart(); await check(); assert.equal(uploads, 1);
+});
 
 test('concurrent duplicate send is one remote generation; key conflict and stale revision are distinct', async t => {
   const x = await setup(t);

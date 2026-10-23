@@ -2,6 +2,9 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import http from 'node:http';
 import {httpFetch} from './http-fetch.mjs';
+import {mkdtemp,open,rm} from 'node:fs/promises';
+import {tmpdir} from 'node:os';
+import {join} from 'node:path';
 
 test('HTTP transport preserves multipart bytes, streams, cookies and status; never follows or retries',async()=>{
   let calls=0,finish;
@@ -36,6 +39,23 @@ test('HTTP transport preserves multipart bytes, streams, cookies and status; nev
     assert.equal(calls,4);
     await assert.rejects(httpFetch(root+'/break'),/HTTP_TRANSPORT_ERROR/);assert.equal(calls,5);
   }finally{server.closeAllConnections();await new Promise(resolve=>server.close(resolve));}
+});
+
+test('disk multipart uploads beyond the former limit without encoding the file in the IPC request',async()=>{
+  const directory=await mkdtemp(join(tmpdir(),'http-upload-'));
+  const path=join(directory,'large.bin'),size=21*1024*1024;
+  const file=await open(path,'wx',0o600);await file.truncate(size);await file.write(Buffer.from('FILE_END'),0,8,size-8);await file.close();
+  let received=0,tail=Buffer.alloc(0);
+  const server=http.createServer(async(req,res)=>{
+    assert.match(req.headers['content-type'],/^multipart\/form-data; boundary=/);
+    for await(const chunk of req){received+=chunk.length;tail=Buffer.concat([tail,chunk]).subarray(-256);}
+    res.end('ok');
+  });
+  await new Promise(resolve=>server.listen(0,'127.0.0.1',resolve));
+  try{
+    const response=await httpFetch(`http://127.0.0.1:${server.address().port}`,{method:'POST',uploadFile:{path,name:'large.bin',type:'application/octet-stream'}});
+    assert.equal(await response.text(),'ok');assert(received>size);assert(received<size+1024);assert(tail.includes(Buffer.from('FILE_END')));
+  }finally{server.closeAllConnections();await new Promise(resolve=>server.close(resolve));await rm(directory,{recursive:true,force:true});}
 });
 
 test('missing HTTP helper fails explicitly and an already aborted call does not start',async()=>{

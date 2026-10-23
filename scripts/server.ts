@@ -25,4 +25,5 @@ server.server.onclose = () => { void stop(); };
 process.stdin.once('end', () => { void stop(); });
 process.once('SIGINT', () => { void stop(); });
 process.once('SIGTERM', () => { void stop(); });
-await server.connect(new StdioServerTransport());
+// Gemini decides input capacity; the SDK's default 10 MiB message cap is local.
+await server.connect(new StdioServerTransport(process.stdin, process.stdout, { maxBufferSize: Infinity }));

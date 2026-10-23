@@ -1,12 +1,12 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtemp, rm, writeFile, truncate } from 'node:fs/promises';
+import { mkdtemp, rm, writeFile, truncate, readFile, stat, open } from 'node:fs/promises';
+import { writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { Client } from '@modelcontextprotocol/sdk/client/index.js';
 import { InMemoryTransport } from '@modelcontextprotocol/sdk/inMemory.js';
 import { createAgentMcpServer } from '../../src/api/agent-mcp.ts';
-import { MAX_FILE_BYTES } from '../../src/upload-limits.mjs';
 import { ApiService } from '../../src/api/service.ts';
 import { ApiError } from '../../src/api/types.ts';
 import { Remote, until } from './helpers.ts';
@@ -126,8 +126,10 @@ test('local MCP uploads file bytes once, attaches by ID, and rejects changed or 
   await writeFile(path, content);
   let uploads = 0;
   backend.upload = async (bytes, name) => {
-    uploads++; assert.equal(Buffer.from(bytes).toString(), content);
-    return { name, reference: 'uploaded-receipt', size: bytes.length };
+    uploads++;
+    const data = bytes instanceof Uint8Array ? bytes : await readFile(bytes.path);
+    assert.equal(Buffer.from(data).toString(), content);
+    return { name, reference: 'uploaded-receipt', size: data.length };
   };
   const args = { request_id: 'upload-1', path };
   const file = await call('upload_gemini_file', args);
@@ -140,10 +142,32 @@ test('local MCP uploads file bytes once, attaches by ID, and rejects changed or 
   assert.equal(backend.generations[0].input.files[0].reference, 'uploaded-receipt');
   await writeFile(path, 'changed');
   assert.equal((await call('upload_gemini_file', args)).error, 'IDEMPOTENCY_CONFLICT');
-  await truncate(path, MAX_FILE_BYTES + 1);
-  assert.equal((await call('upload_gemini_file', { ...args, request_id: 'too-large' })).error, 'FILE_TOO_LARGE');
+  await truncate(path, 21 * 1024 * 1024);
+  let snapshot = '';
+  backend.upload = async (source, name) => {
+    assert(!(source instanceof Uint8Array));
+    snapshot = source.path;
+    assert.equal((await stat(snapshot)).size, 21 * 1024 * 1024);
+    return { name, reference: 'large-file', size: source.size };
+  };
+  const large = await call('upload_gemini_file', { ...args, request_id: 'large' });
+  assert.equal(large.size, 21 * 1024 * 1024);
+  await assert.rejects(stat(snapshot), { code: 'ENOENT' });
+  const many = await call('ask_gemini_chat', { request_id: 'large-input', prompt: 'x'.repeat(120001), file_ids: Array(11).fill(large.file_id), wait_ms: 1000 });
+  assert.equal(many.status, 'completed');
+  assert.equal(backend.generations.at(-1)!.input.files.length, 11);
   assert.equal((await call('upload_gemini_file', { request_id: 'directory', path: dir })).error, 'INVALID_FILE');
   const relative = await client.callTool({ name: 'upload_gemini_file', arguments: { request_id: 'relative', path: 'receipt.txt' } });
   assert.equal(relative.isError, true);
   assert.equal(uploads, 1);
+  const handle = await open(path), prototype = Object.getPrototypeOf(handle);
+  await handle.close();
+  const original = prototype.createReadStream;
+  const changed = t.mock.method(prototype, 'createReadStream', function(this: any, options: any) {
+    const stream = original.call(this, options);
+    stream.once('data', () => writeFileSync(path, 'changed while copying'));
+    return stream;
+  });
+  assert.equal((await call('upload_gemini_file', { ...args, request_id: 'changed-during-copy' })).error, 'FILE_CHANGED');
+  changed.mock.restore();
 });

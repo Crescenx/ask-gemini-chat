@@ -3,12 +3,8 @@ import mime from 'mime-types';
 import {SessionAuth} from './web-auth.mjs';
 import {ARGON,frames,generation,protocolError} from './web-protocol.mjs';
 import {httpFetch} from './http-fetch.mjs';
-import {validFileBase64} from './upload-limits.mjs';
 
 const ROOT='https://gemini.google.com';
-export const GENERATION_TIMEOUT_MS=30*60*1000;
-export const GENERATION_WAIT_MS=GENERATION_TIMEOUT_MS+3*60*1000;
-export const MAX_RESPONSE_FRAME_CHARS=1000000;
 export class WebAPI {
   constructor({auth=new SessionAuth({file:process.env.GEMINI_SESSION_FILE}),fetchImpl=httpFetch}={}){
     this.auth=auth;this.fetch=fetchImpl;this.requests=new Map();
@@ -16,19 +12,23 @@ export class WebAPI {
   async init(){this.session=await this.auth.ensure();return {transport:'curl-http',model:ARGON,browserRequired:false};}
   async request(url,options={},timeout=20000){
     const cookie=new URL(url).origin===ROOT?Object.entries(this.session.cookies).map(([k,v])=>k+'='+v).join('; '):undefined;
-    const r=await this.fetch(url,{...options,redirect:'error',signal:AbortSignal.timeout(timeout),headers:{accept:'*/*','origin':ROOT,'referer':ROOT+'/app','sec-fetch-mode':'cors','sec-fetch-dest':'empty','sec-fetch-site':cookie?'same-origin':'cross-site',...(cookie?{cookie}:{}),...options.headers}});
-    if(!r.ok)throw Error('HTTP_'+r.status);
+    const r=await this.fetch(url,{...options,redirect:'error',signal:timeout===null?undefined:AbortSignal.timeout(timeout),headers:{accept:'*/*','origin':ROOT,'referer':ROOT+'/app','sec-fetch-mode':'cors','sec-fetch-dest':'empty','sec-fetch-site':cookie?'same-origin':'cross-site',...(cookie?{cookie}:{}),...options.headers}});
+    if(!r.ok){await r.body?.cancel().catch(()=>{});throw Error('HTTP_'+r.status);}
     return r;
   }
   async upload(files){
-    if(files.length>8)throw Error('ATTACHMENT_COUNT_LIMIT');
     this.session=await this.auth.ensure();
     const refs=[];
     for(const f of files){
-      if(!validFileBase64(f.base64))throw Error('ATTACHMENT_SIZE_LIMIT');
       const type=mime.lookup(f.name)||'application/octet-stream';
-      const form=new FormData();form.append('file',new Blob([Buffer.from(f.base64,'base64')],{type}),f.name);
-      const r=await this.request('https://content-push.googleapis.com/upload',{method:'POST',headers:{'X-Tenant-Id':'bard-storage','Push-ID':this.session.pushId},body:form},120000);
+      let upload;
+      if(f.path) upload={uploadFile:{path:f.path,name:f.name,type}};
+      else {
+        if(!(f.bytes instanceof Uint8Array))throw Error('INVALID_FILE');
+        const form=new FormData();form.append('file',new Blob([f.bytes],{type}),f.name);
+        upload={body:form};
+      }
+      const r=await this.request('https://content-push.googleapis.com/upload',{method:'POST',headers:{'X-Tenant-Id':'bard-storage','Push-ID':this.session.pushId},...upload},null);
       const id=await r.text();if(!id.startsWith('/contrib_service/'))throw Error('UPLOAD_INVALID_REFERENCE');
       refs.push([[id,type.startsWith('image/')?1:3,null,type],f.name,null,null,null,null,null,null,[0]]);
     }
@@ -36,10 +36,10 @@ export class WebAPI {
   }
   /** @param {{id?: string, prompt: string, metadata?: any[], files?: any[], operationFlag?: number, temporary?: boolean}} input */
   async start({id=crypto.randomUUID(),prompt,metadata=['','',''],files=[],operationFlag,temporary=false}){
-    if(typeof prompt!=='string'||!prompt.length||prompt.length>120000)throw Error('PROMPT_SIZE_LIMIT');
+    if(typeof prompt!=='string'||!prompt.length)throw Error('INVALID_PROMPT');
     if(typeof temporary!=='boolean')throw Error('INVALID_CHAT_MODE');
     if(operationFlag!==undefined&&![2,5].includes(operationFlag))throw Error('INVALID_OPERATION_FLAG');
-    const input={id,prompt,metadata,files,temporary,...(operationFlag===undefined?{}:{operationFlag})},signature=JSON.stringify(input),prior=this.requests.get(id);
+    const input={id,prompt,metadata,files,temporary,...(operationFlag===undefined?{}:{operationFlag})},signature=crypto.createHash('sha256').update(JSON.stringify(input)).digest('hex'),prior=this.requests.get(id);
     if(prior){if(prior.signature!==signature)throw Error('REQUEST_ID_CONFLICT');return id;}
     const state={signature,raw:'',receivedChars:0,done:false,status:null,startedAt:Date.now()};this.requests.set(id,state);
     state.task=this.generate(input,state).catch(e=>{state.error=e.name==='TimeoutError'?'GENERATION_TIMEOUT':/^[A-Z][A-Z_0-9: ]*$/.test(e.message)?e.message:'TRANSPORT_ERROR';}).finally(()=>{state.done=true;state.elapsedMs=Date.now()-state.startedAt;});
@@ -58,12 +58,11 @@ export class WebAPI {
     const modelHeader=[1,null,null,null,ARGON,null,null,0,[4,5,6,8],null,null,1,null,null,8,1,crypto.randomUUID()];
     const headers={'content-type':'application/x-www-form-urlencoded;charset=UTF-8','x-same-domain':'1','x-goog-authuser':'0','x-goog-ext-73010989-jspb':'[0]','x-goog-ext-73010990-jspb':'[0,0,0]','x-goog-ext-525001261-jspb':JSON.stringify(modelHeader),'x-goog-ext-525005358-jspb':JSON.stringify([input.id,1])};
     state.stage='generation';
-    const r=await this.request(ROOT+'/_/BardChatUi/data/assistant.lamda.BardFrontendService/StreamGenerate?'+query,{method:'POST',headers,body:new URLSearchParams({at:this.session.accessToken,'f.req':JSON.stringify([null,JSON.stringify(body)])})},GENERATION_TIMEOUT_MS);
+    const r=await this.request(ROOT+'/_/BardChatUi/data/assistant.lamda.BardFrontendService/StreamGenerate?'+query,{method:'POST',headers,body:new URLSearchParams({at:this.session.accessToken,'f.req':JSON.stringify([null,JSON.stringify(body)])})},null);
     state.status=r.status;
     const reader=r.body.getReader(),decoder=new TextDecoder();
-    let pending='';
+    let pending=[];
     const accept=line=>{
-      if(line.length>MAX_RESPONSE_FRAME_CHARS)throw Error('RESPONSE_FRAME_SIZE_LIMIT');
       if(!line.startsWith('['))return;
       const raw=line+'\n';
       let parsed;
@@ -83,19 +82,24 @@ export class WebAPI {
       for(;;){
         const {value,done}=await reader.read();
         const text=done?decoder.decode():decoder.decode(value,{stream:true});
-        state.receivedChars+=text.length;pending+=text;
-        let newline;
-        while((newline=pending.indexOf('\n'))>=0){accept(pending.slice(0,newline));pending=pending.slice(newline+1);}
-        if(pending.length>MAX_RESPONSE_FRAME_CHARS)throw Error('RESPONSE_FRAME_SIZE_LIMIT');
-        if(done){if(pending)accept(pending);state.exhausted=true;break;}
+        state.receivedChars+=text.length;
+        let start=0,newline;
+        while((newline=text.indexOf('\n',start))>=0){
+          pending.push(text.slice(start,newline));accept(pending.join(''));pending=[];start=newline+1;
+        }
+        if(start<text.length)pending.push(text.slice(start));
+        if(done){if(pending.length)accept(pending.join(''));state.exhausted=true;break;}
       }
     }finally{await reader.cancel().catch(()=>{});reader.releaseLock();}
   }
   async poll(id){const state=this.requests.get(id);if(!state)throw Error('REQUEST_UNKNOWN');const {signature,task,...result}=state;return result;}
-  async history(cid,limit=20){
+  release(id){if(this.requests.get(id)?.done)this.requests.delete(id);}
+  /** @param {string} cid @param {number} limit @param {string|null} cursor */
+  async history(cid,limit=20,cursor=null){
     if(!/^c_[a-f0-9]+$/.test(cid))throw Error('INVALID_CONVERSATION');
-    if(!Number.isInteger(limit)||limit<1||limit>1000)throw Error('INVALID_HISTORY_LIMIT');
-    return this.rpc('hNvQHb',[cid,limit,null,1,[1],[4],null,1]);
+    if(!Number.isSafeInteger(limit)||limit<1)throw Error('INVALID_HISTORY_LIMIT');
+    if(cursor!==null&&typeof cursor!=='string')throw Error('INVALID_HISTORY_CURSOR');
+    return this.rpc('hNvQHb',[cid,limit,cursor,1,[1],[4],null,1]);
   }
   async rpc(method,payload){
     if(!['hNvQHb','KDNZr','kOWVAe'].includes(method))throw Error('UNSUPPORTED_RPC');

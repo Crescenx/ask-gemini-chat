@@ -1,6 +1,7 @@
 export type Position = { cid: string; rid: string; rcid: string };
 export type Attachment = { name: string; reference: unknown; size?: number };
 export type FileRef = { id: string; name: string; size?: number; accountId: string };
+export type UploadSource = Uint8Array | { path: string; size: number; sha256: string };
 export type TurnData = {
   position: Position;
   input: { text: string; files: Attachment[] };
@@ -50,7 +51,7 @@ export type BackendChat = { cid: string; turns: TurnData[] };
 export interface Backend {
   capabilities(accountId?: string): Promise<Capabilities>;
   history(cid: string, accountId?: string): Promise<TurnData[]>;
-  upload(bytes: Uint8Array, name: string, accountId?: string): Promise<Attachment>;
+  upload(bytes: UploadSource, name: string, accountId?: string): Promise<Attachment>;
   generate(input: Generation, observe: (event: Observation) => void): Promise<TurnData>;
   fork(at: Position, accountId?: string): Promise<BackendChat>;
   select(at: Position, accountId?: string): Promise<void>;

@@ -5,7 +5,7 @@ import {join} from 'node:path';
 import {Client} from '@modelcontextprotocol/sdk/client/index.js';
 import {StdioClientTransport} from '@modelcontextprotocol/sdk/client/stdio.js';
 import {installationConfig, dataDirectory} from '../src/config.mjs';
-import {WebAPI, GENERATION_WAIT_MS} from '../src/web-client.mjs';
+import {WebAPI} from '../src/web-client.mjs';
 import {historyTurns, ARGON} from '../src/web-protocol.mjs';
 
 let client, record;
@@ -36,7 +36,7 @@ try {
     let result = record.run_id ? await call('get_gemini_result', {run_id: record.run_id, wait_ms: 0}) :
       await call('ask_gemini_chat', {request_id: record.request_id, prompt: record.prompt, mode: 'normal', wait_ms: 0});
     record.run_id = result.run_id; await save();
-    const deadline = Date.now() + GENERATION_WAIT_MS;
+    const deadline = Date.now() + 33 * 60 * 1000;
     while (['running', 'uncertain'].includes(result.status) && Date.now() < deadline) {
       if (result.status === 'uncertain') await new Promise(resolve => setTimeout(resolve, 2000));
       result = await call('get_gemini_result', {run_id: record.run_id, wait_ms: 20000});

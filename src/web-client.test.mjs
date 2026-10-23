@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import {WebAPI,GENERATION_TIMEOUT_MS,GENERATION_WAIT_MS,MAX_RESPONSE_FRAME_CHARS} from './web-client.mjs';
+import {WebAPI} from './web-client.mjs';
 import {ARGON,generation} from './web-protocol.mjs';
 
 const session={cookies:{'__Secure-1PSID':'private-cookie'},accessToken:'private-csrf',build:'build',sessionId:'session',pushId:'push'};
@@ -25,14 +25,13 @@ test('HTTP client uploads, streams, deduplicates and reads history without attes
     return new Response('history');
   }});
   assert.equal((await api.init()).browserRequired,false);
-  const files=await api.upload([{name:'x.txt',base64:Buffer.from('file').toString('base64')}]);
+  const files=await api.upload([{name:'x.txt',bytes:Buffer.from('file')}]);
   assert.deepEqual(files,[[['/contrib_service/test',3,null,'text/plain'],'x.txt',null,null,null,null,null,null,[0]]]);
   const input={id:'test-id',prompt:'exact prompt',metadata:['c_abc','r_abc','rc_abc'],files};
   const request=api.request.bind(api);
   api.request=(url,options,timeout)=>{
     if(url.includes('StreamGenerate')){
-      assert.equal(timeout,30*60*1000);assert.equal(timeout,GENERATION_TIMEOUT_MS);
-      assert(GENERATION_WAIT_MS>timeout);
+      assert.equal(timeout,null);
     }
     return request(url,options,timeout);
   };
@@ -61,7 +60,7 @@ test('authentication failure and uncertain transport do not automatically resend
 test('CSV and image uploads preserve their MIME type in both multipart and file descriptors',async()=>{
   const types=[];
   const api=new WebAPI({auth,fetchImpl:async(_url,options)=>{types.push(options.body.get('file').type);return new Response('/contrib_service/file');}});
-  const files=await api.upload(['table.csv','image.png'].map(name=>({name,base64:Buffer.from('fixture').toString('base64')})));
+  const files=await api.upload(['table.csv','image.png'].map(name=>({name,bytes:Buffer.from('fixture')})));
   assert.deepEqual(types,['text/csv','image/png']);
   assert.deepEqual(files.map(file=>[file[0][1],file[0][3]]),[[3,'text/csv'],[1,'image/png']]);
 });
@@ -119,7 +118,6 @@ test('long cumulative streams retain bounded latest snapshots, UTF-8 and metadat
 test('stream errors retain partial text and do not let cleanup hide the original cause',async()=>{
   const errorFrame=JSON.stringify([['wrb.fr',null,null,null,null,[9,null,[['BardErrorInfo',[1097]]]]]])+'\n';
   for(const [name,tail,expected] of [
-    ['oversized','['+' '.repeat(MAX_RESPONSE_FRAME_CHARS),'RESPONSE_FRAME_SIZE_LIMIT'],
     ['malformed','[["truncated"','INVALID_STREAM_FRAME'],
     ['rejection',errorFrame+'[["e",4]]\n',undefined],
   ]){
@@ -133,4 +131,34 @@ test('stream errors retain partial text and do not let cleanup hide the original
     if(name==='rejection'){assert(s.exhausted);assert.deepEqual(s.rejection,{rpcCode:9,code:1097});}
     else assert(!s.exhausted);
   }
+});
+
+test('large individual frames and long prompts survive chunk boundaries; consumed responses are released',async()=>{
+  const answer='中文😀'.repeat(300000), wire=frame.replace('answer',answer), bytes=new TextEncoder().encode(wire);
+  let offset=0;
+  const api=new WebAPI({auth,fetchImpl:async(_url,options)=>{
+    assert.equal(options.signal,undefined);
+    const body=JSON.parse(JSON.parse(options.body.get('f.req'))[1]);
+    assert.equal(body[0][0].length,120001);
+    return new Response(new ReadableStream({pull(c){
+      if(offset===bytes.length){c.close();return;}
+      const end=Math.min(offset+65521,bytes.length);c.enqueue(bytes.subarray(offset,end));offset=end;
+    }}));
+  }});
+  await api.start({id:'large-frame',prompt:'x'.repeat(120001)});
+  api.release('large-frame');assert.equal(api.requests.size,1);
+  const result=await done(api,'large-frame');
+  assert.equal(result.error,undefined);assert(result.exhausted);assert.equal(result.response.text,answer);
+  api.release('large-frame');assert.equal(api.requests.size,0);
+});
+
+test('upstream HTTP rejection cancels the response and history forwards the opaque page token',async()=>{
+  let cancelled=false;
+  const api=new WebAPI({auth,fetchImpl:async()=>new Response(new ReadableStream({cancel(){cancelled=true;}}),{status:413})});
+  await api.init();await assert.rejects(api.request('https://gemini.google.com/test'),/HTTP_413/);assert(cancelled);
+  api.fetch=async(_url,options)=>{
+    const payload=JSON.parse(JSON.parse(options.body.get('f.req'))[0][0][1]);
+    assert.equal(payload[2],'opaque-token');return new Response('history');
+  };
+  assert.equal(await api.history('c_abc',20,'opaque-token'),'history');
 });

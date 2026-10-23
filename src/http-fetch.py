@@ -3,7 +3,7 @@ import json
 import sys
 
 try:
-    from curl_cffi import requests
+    from curl_cffi import requests, CurlMime, CurlOpt
 except ImportError:
     print(json.dumps({"error": "HTTP_TRANSPORT_UNAVAILABLE"}), flush=True)
     sys.exit(1)
@@ -11,11 +11,18 @@ except ImportError:
 opened = False
 try:
     request = json.load(sys.stdin)
+    multipart = None
+    if request.get("uploadFile"):
+        file = request["uploadFile"]
+        multipart = CurlMime()
+        multipart.addpart(name="file", content_type=file["type"], filename=file["name"], local_path=file["path"])
     # libcurl honors the existing proxy environment; certificate checks stay enabled.
     response = requests.request(
         request["method"], request["url"], headers=dict(request["headers"]),
         data=base64.b64decode(request["body"]) or None,
-        impersonate="chrome150", stream=True, timeout=(20, 1800), allow_redirects=False,
+        multipart=multipart,
+        impersonate="chrome150", stream=True, timeout=None, allow_redirects=False,
+        curl_options={CurlOpt.CONNECTTIMEOUT_MS: 20000},
     )
     headers = [(k, v) for k, v in response.headers.multi_items()
                if k.lower() not in ("content-encoding", "content-length", "transfer-encoding")]
@@ -28,3 +35,6 @@ except Exception:
     if not opened:
         print(json.dumps({"error": "HTTP_TRANSPORT_ERROR"}), flush=True)
     sys.exit(1)
+finally:
+    if "multipart" in locals() and multipart is not None:
+        multipart.close()

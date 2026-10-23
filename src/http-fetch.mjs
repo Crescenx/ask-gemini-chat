@@ -54,6 +54,6 @@ export async function httpFetch(url,options={}){
       if(code!==0||!opened){fail(Error('HTTP_TRANSPORT_ERROR'));return;}
       ended=true;cleanup();controller?.close();
     });
-    child.stdin.end(JSON.stringify({url:request.url,method:request.method,headers:[...request.headers],body}));
+    child.stdin.end(JSON.stringify({url:request.url,method:request.method,headers:[...request.headers],body,uploadFile:options.uploadFile}));
   });
 }

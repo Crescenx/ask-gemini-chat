@@ -23,6 +23,8 @@ test('standalone stdio starts outside the checkout and exposes only three tools'
     const result = await client.callTool({ name: 'get_gemini_result', arguments: { run_id: 'missing', wait_ms: 0 } });
     assert.equal(result.isError, true);
     assert.equal(JSON.parse((result.content as any[])[0].text).error, 'RUN_NOT_FOUND');
+    const large = await client.callTool({ name: 'ask_gemini_chat', arguments: { request_id: 'large-stdio', chat_id: 'missing', prompt: 'x'.repeat(11 * 1024 * 1024), wait_ms: 0 } });
+    assert.equal(JSON.parse((large.content as any[])[0].text).error, 'CHAT_NOT_FOUND');
     await client.close();
     await assert.rejects(stat(join(dir, 'state.sqlite.lock')), { code: 'ENOENT' });
   } finally { await client.close(); await rm(dir, { recursive: true, force: true }); }

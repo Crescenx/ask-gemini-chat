@@ -1,14 +1,13 @@
 import { createHash, randomUUID } from 'node:crypto';
 import { z } from 'zod';
 import { Store } from './store.ts';
-import { MAX_FILE_BYTES } from '../upload-limits.mjs';
 import { ApiError, canonical, fail, samePosition } from './types.ts';
-import type { Attachment, AttachChat, Backend, ChatInfo, CreateChat, FileRef, ForkInput, ForkResult, Generation, Input, Position, RunInfo, Turn, TurnData } from './types.ts';
+import type { Attachment, AttachChat, Backend, ChatInfo, CreateChat, FileRef, ForkInput, ForkResult, Generation, Input, Position, RunInfo, Turn, TurnData, UploadSource } from './types.ts';
 
 const idSchema = z.string().min(1).max(200);
 const positionSchema = z.object({ cid: z.string().regex(/^c_[a-f0-9]+$/), rid: z.string().regex(/^r_[a-f0-9]+$/), rcid: z.string().regex(/^rc_[a-f0-9]+$/) }).strict();
-const textSchema = z.string().min(1).max(120000);
-const inputSchema = z.object({ text: textSchema, files: z.array(idSchema).max(8).optional() }).strict();
+const textSchema = z.string().min(1);
+const inputSchema = z.object({ text: textSchema, files: z.array(idSchema).optional() }).strict();
 const forkSchema = z.union([
   z.object({ mode: z.literal('new-chat').optional(), at: positionSchema }).strict(),
   z.object({ mode: z.literal('in-place'), at: positionSchema, input: z.object({ text: textSchema }).strict() }).strict(),
@@ -20,7 +19,7 @@ function validate<T>(schema: z.ZodType<T>, value: unknown): T {
 }
 type ChatRecord = ChatInfo & { busy?: string; observedHead?: Position };
 type RunRecord = RunInfo & { generation: Generation; observed?: Position };
-type Idempotency = { signature: string; kind: 'run' | 'value' | 'operation'; id?: string; value?: any; status?: 'pending' | 'uncertain' };
+type Idempotency = { signature: string; kind: 'run' | 'value' | 'operation' | 'error'; id?: string; value?: any; status?: 'pending' | 'uncertain' };
 const temporaryUncertain = { code: 'TEMPORARY_RESULT_UNRECOVERABLE', message: 'Temporary response was not saved completely. Upstream history is unavailable; this request will not be resent.' };
 
 export class ApiService {
@@ -59,6 +58,7 @@ export class ApiService {
     const old = this.store.get<Idempotency>('idempotency', this.key(scope, key));
     if (!old) return undefined;
     if (old.signature !== canonical(payload)) fail('IDEMPOTENCY_CONFLICT');
+    if (old.kind === 'error') throw new ApiError(old.value.code, old.value.message, old.value.status);
     if (old.kind === 'run') return this.getRun(old.id!);
     if (old.kind === 'operation') throw new ApiError('OPERATION_UNCERTAIN', 'The upstream operation may have completed; it will not be repeated');
     return old.value;
@@ -154,10 +154,10 @@ export class ApiService {
   private attachments(ids: string[], accountId: string): Attachment[] {
     return ids.map(id => { const file = this.store.get<FileRef & { attachment: Attachment }>('files', id); if (!file || file.accountId !== accountId) fail('FILE_NOT_ACCESSIBLE', 400); return file.attachment; });
   }
-  async upload(bytes: Uint8Array, name: string, accountId = 'default', key: string = randomUUID()): Promise<FileRef> {
-    if (bytes.length > MAX_FILE_BYTES) fail('FILE_TOO_LARGE', 413);
-    if (!bytes.length || typeof name !== 'string' || !name || name.length > 200 || /[\\/\x00-\x1f]/.test(name)) fail('INVALID_FILE', 400);
-    const payload = { accountId, name, hash: createHash('sha256').update(bytes).digest('hex') };
+  async upload(bytes: UploadSource, name: string, accountId = 'default', key: string = randomUUID()): Promise<FileRef> {
+    const size = bytes instanceof Uint8Array ? bytes.length : bytes.size;
+    if (!size || typeof name !== 'string' || !name || /[\\/\x00-\x1f]/.test(name)) fail('INVALID_FILE', 400);
+    const payload = { accountId, name, hash: bytes instanceof Uint8Array ? createHash('sha256').update(bytes).digest('hex') : bytes.sha256 };
     return this.locked('upload:' + accountId, async () => {
       const old = this.replay('upload', key, payload); if (old) return old;
       await this.backend.capabilities(accountId);
@@ -165,10 +165,18 @@ export class ApiService {
       try {
         const attachment = await this.backend.upload(bytes, name, accountId);
         if (this.closed) fail('SERVICE_CLOSED', 503);
-        const file = { id: randomUUID(), name, size: bytes.length, accountId };
+        const file = { id: randomUUID(), name, size, accountId };
         this.store.transaction(() => { this.store.put('files', file.id, { ...file, attachment }); this.remember('upload', key, payload, { kind: 'value', signature: '', value: file }); });
         return file;
-      } catch { if (this.closed) fail('SERVICE_CLOSED', 503); this.remember('upload', key, payload, { kind: 'operation', signature: '', status: 'uncertain' }); throw new ApiError('OPERATION_UNCERTAIN', 'Upload outcome is unknown'); }
+      } catch (error) {
+        if (this.closed) fail('SERVICE_CLOSED', 503);
+        if (error instanceof ApiError && error.code === 'UPLOAD_REJECTED') {
+          this.remember('upload', key, payload, { kind: 'error', signature: '', value: { code: error.code, message: error.message, status: error.status } });
+          throw error;
+        }
+        this.remember('upload', key, payload, { kind: 'operation', signature: '', status: 'uncertain' });
+        throw new ApiError('OPERATION_UNCERTAIN', 'Upload outcome is unknown');
+      }
     });
   }
   private asTurn(chatId: string, turn: TurnData): Turn {

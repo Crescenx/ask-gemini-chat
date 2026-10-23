@@ -9,6 +9,14 @@ const row = (rid: string, text: string, answer: string, status = 2) => [['c_abcd
 const generation = (rid: string, text: string) => JSON.stringify([['wrb.fr', null, JSON.stringify([null, ['c_abcd', rid], null, null, [candidate('rc_' + rid.slice(2), text)]])]]) + '\n';
 const request: Generation = { id: 'req-1', accountId: 'default', model: 'argon', operation: 'fork-in-place', cid: 'c_abcd', at: { cid: 'c_abcd', rid: 'r_2', rcid: 'rc_2' }, parent: { cid: 'c_abcd', rid: 'r_1', rcid: 'rc_1' }, input: { text: 'replacement', files: [{ name: 'image.png', reference: [['/contrib_service/test'], 'image.png'] }] }, baseline: [{ cid: 'c_abcd', rid: 'r_1', rcid: 'rc_1' }, { cid: 'c_abcd', rid: 'r_2', rcid: 'rc_2' }] };
 
+test('upload distinguishes explicit size rejection from an uncertain connection failure',async()=>{
+  let error=Error('HTTP_413');
+  const backend=new NativeBackend({api:{upload:async()=>{throw error;}} as any});
+  await assert.rejects(backend.upload(Buffer.from('fixture'),'file.txt'),{code:'UPLOAD_REJECTED',status:413});
+  error=Error('HTTP_TRANSPORT_ERROR');
+  await assert.rejects(backend.upload(Buffer.from('fixture'),'file.txt'),{message:'HTTP_TRANSPORT_ERROR'});
+});
+
 test('native adapter passes edit flag, parent position and unchanged attachment; completion requires independent history', async () => {
   let submitted: any;
   const api = {
@@ -32,19 +40,46 @@ test('a complete-looking stream without matching server history remains uncertai
   await assert.rejects(adapter.generate(request, () => {}), { code: 'UPSTREAM_UNCERTAIN' });
 });
 
-test('a generation still running after ten minutes is awaited without resubmission', async t => {
+test('a generation still running after two hours is awaited without resubmission', async t => {
   let now = 0, polls = 0, submissions = 0;
   t.mock.method(Date, 'now', () => now);
   const api = {
     start: async () => { submissions++; return request.id; },
     poll: async () => {
-      if (++polls === 1) { now = 10 * 60 * 1000; return { done: false, raw: '' }; }
+      if (++polls === 1) { now = 2 * 60 * 60 * 1000; return { done: false, raw: '' }; }
       return { done: true, exhausted: true, status: 200, raw: generation('r_3', 'answer') };
     },
     history: async () => history([row('r_3', 'replacement', 'answer'), row('r_1', 'first', 'first answer')]),
   };
   const result = await new NativeBackend({ api: api as any, pollMs: 1 }).generate(request, () => {});
   assert.equal(result.position.rid, 'r_3'); assert.equal(submissions, 1); assert.equal(polls, 2);
+});
+
+test('history paginates past 1000 turns and native completion releases transport snapshots', async()=>{
+  const cursors:(string|null)[]=[];
+  const adapter=new NativeBackend({api:{history:async(_cid:string,limit:number,cursor:string|null)=>{
+    cursors.push(cursor);assert.equal(limit,20);
+    const offset=cursor?Number(cursor):0, count=Math.min(limit,1300-offset);
+    const rows=Array.from({length:count},(_,i)=>row('r_'+(1300-offset-i).toString(16),'question','answer'));
+    return JSON.stringify([['wrb.fr','hNvQHb',JSON.stringify([rows,offset+count<1300?String(offset+count):null])]])+'\n';
+  }} as any});
+  const turns=await adapter.history('c_abcd');assert.equal(turns.length,1300);
+  assert.equal(turns[0].position.rid,'r_1');assert.equal(turns.at(-1)!.position.rid,'r_514');
+  assert.equal(cursors.length,65);assert.equal(cursors.at(-1),'1280');
+  let released='';
+  const backend=new NativeBackend({api:{start:async()=>request.id,poll:async()=>({done:true,error:'broken'}),release:(id:string)=>{released=id;}} as any});
+  await assert.rejects(backend.generate(request,()=>{}));assert.equal(released,request.id);
+});
+
+test('history rejects repeated cursors and overlapping pages instead of looping or duplicating turns',async()=>{
+  for(const overlap of [false,true]){
+    let calls=0;
+    const adapter=new NativeBackend({api:{history:async()=>{
+      const rows=[row('r_'+(overlap?1:++calls),'question','answer')];
+      return JSON.stringify([['wrb.fr','hNvQHb',JSON.stringify([rows,'same-cursor'])]])+'\n';
+    }} as any});
+    await assert.rejects(adapter.history('c_abcd'),{code:overlap?'UPSTREAM_HISTORY_CHANGED':'UPSTREAM_HISTORY_INVALID_CURSOR'});
+  }
 });
 
 test('recovery rejects old identical text and incomplete upstream turn, instead of inventing success', async () => {
