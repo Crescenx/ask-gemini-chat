@@ -1,0 +1,25 @@
+{
+  "manifest_version": 3,
+  "name": "Gemini MCP 登录助手",
+  "version": "0.2.0",
+  "description": "自动同步当前浏览器的 Gemini 登录状态到本机 MCP，并显示连接状态。",
+  "minimum_chrome_version": "120",
+  "permissions": [
+    "cookies",
+    "nativeMessaging",
+    "storage",
+    "alarms"
+  ],
+  "host_permissions": [
+    "https://*.google.com/*"
+  ],
+  "background": {
+    "service_worker": "background.js",
+    "type": "module"
+  },
+  "action": {
+    "default_popup": "popup.html",
+    "default_title": "Gemini MCP 登录状态"
+  },
+  "key": "MIIBIjANBgkqhkiG9w0BAQEFAAOCAQ8AMIIBCgKCAQEAuUL+oTB+Z0tUIL5gq+nYtfODwRM6S7xX1GTiaHUgU386uAKHoiNs1U64lyuAVZt17/nJ4VJgla55b/yPCpJygZ9fvaRXY4W/x9dAG9MCqbFtdcvB9+ja1v2tQb5GHTZTMlmPUCxJl7Dqq9nJIR7jQnWfK7Vr9tQv6BXrQ9/fwgQ/Xvwxi3ncmIcZFyg6LShkPC4tSfXQv7AYM3n0todnUgcZqZbuFaT84b3jhdMHjqQD5Ip15PQbLHz9j295EHrx8NTprsPemBk4xSCHcOG5Fob9oTGz3N2/uaMw8Ovm4tK44/8ntky+ZI8ynUVLa67TmrseVCfLq3RcO1yiFa9GYQIDAQAB"
+}

@@ -143,3 +143,42 @@ test('account mismatch pauses maintenance without replacing account or cookies',
   assert.equal(after.state,'login_required');assert.equal(after.account,before.account);
   assert.deepEqual(after.cookies,before.cookies);
 }));
+
+test('browser synchronization keeps HTTP-rotated cookies until the browser snapshot changes',()=>fixture(async file=>{
+  let rotations=0,identity='test@example.invalid',now=1000000,fail=false;
+  const auth=new SessionAuth({file,now:()=>now,fetchImpl:async url=>{
+    if(fail)throw Error('offline');
+    if(url.endsWith('/RotateCookies'))return new Response('[]',{headers:{'set-cookie':`__Secure-1PSIDTS=http-${++rotations}; Secure`}});
+    return new Response(page(identity));
+  }});
+  const browser={'__Secure-1PSID':'browser','__Secure-1PSIDTS':'browser-ts'};
+  await auth.syncBrowser(browser);
+  await auth.ensure();
+  assert.equal((await auth.load()).cookies['__Secure-1PSIDTS'],'http-1');
+  await auth.syncBrowser(browser);
+  assert.equal((await auth.load()).cookies['__Secure-1PSIDTS'],'http-1');
+  assert.equal(rotations,1);
+  const before=await fs.readFile(file,'utf8');
+  fail=true;await assert.rejects(auth.syncBrowser(browser),/NETWORK_ERROR/);
+  assert.equal(await fs.readFile(file,'utf8'),before);
+  fail=false;identity='other@example.invalid';
+  await assert.rejects(auth.syncBrowser({'__Secure-1PSID':'other'}),/ACCOUNT_MISMATCH/);
+  assert.equal(await fs.readFile(file,'utf8'),before);
+  identity='test@example.invalid';now+=600000;
+  await auth.syncBrowser({'__Secure-1PSID':'new-login'});
+  assert.equal((await auth.load()).cookies['__Secure-1PSID'],'new-login');
+}));
+
+test('browser synchronization retries import after a saved session is revoked',()=>fixture(async file=>{
+  let dead=false;
+  const auth=new SessionAuth({file,fetchImpl:async(url,options)=>{
+    if(url.endsWith('/RotateCookies'))return new Response('[]',{headers:{'set-cookie':'__Secure-1PSIDTS=bad; Secure'}});
+    return new Response(dead&&options.headers.cookie.includes('=bad')?'anonymous':page());
+  }});
+  const cookies={'__Secure-1PSID':'browser','__Secure-1PSIDTS':'good'};
+  await auth.syncBrowser(cookies);await auth.ensure();
+  dead=true;
+  await auth.syncBrowser(cookies);
+  assert.equal((await auth.load()).state,'ready');
+  assert.equal((await auth.load()).cookies['__Secure-1PSIDTS'],'good');
+}));

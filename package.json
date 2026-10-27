@@ -19,6 +19,8 @@
     "THIRD_PARTY_NOTICES.md",
     "scripts/*.mjs",
     "scripts/*.ts",
+    "scripts/*.ps1",
+    "extension/**",
     "INSTALL.md",
     "AGENTS.md",
     "!scripts/*.test.mjs"
@@ -26,10 +28,12 @@
   "scripts": {
     "start": "node scripts/server.ts",
     "auth": "node scripts/auth.mjs",
+    "extension:prepare": "node scripts/prepare-extension.mjs",
     "check": "tsc --noEmit",
     "test": "node --test src/*.test.mjs scripts/*.test.mjs test/api/*.test.ts",
     "prepack": "npm run check && npm test",
     "setup": "node scripts/setup.mjs",
+    "update": "node scripts/update.mjs",
     "doctor": "node scripts/doctor.mjs",
     "verify": "node scripts/verify.mjs"
   },

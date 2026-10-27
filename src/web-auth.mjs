@@ -90,7 +90,21 @@ export class SessionAuth {
   async import(value){
     return this.exclusive(()=>this._import(value));
   }
-  async _import(value){
+  async syncBrowser(value){
+    return this.exclusive(async()=>{
+      const cookies=importCookies(value);
+      const fingerprint=crypto.createHash('sha256').update(JSON.stringify(Object.entries(cookies).sort())).digest('hex');
+      let stored;try{stored=await this.load();}catch(e){if(e.code!=='LOGIN_REQUIRED')throw e;}
+      // An unchanged browser snapshot must not overwrite cookies rotated by HTTP.
+      if(stored?.browserFingerprint===fingerprint&&stored.state==='ready'){
+        try{await this._ensure(false);return {state:'ready'};}
+        catch(e){if(e.code!=='LOGIN_REQUIRED')throw e;}
+      }
+      await this._import(cookies,fingerprint);
+      return {state:'ready'};
+    });
+  }
+  async _import(value,browserFingerprint){
     let previous;try{previous=await this.load();}catch(e){if(e.code!=='LOGIN_REQUIRED')throw e;}
     const cookies=importCookies(value);let session,rotated=false;
     try{session=await this.validate(cookies);}catch(e){
@@ -98,7 +112,7 @@ export class SessionAuth {
       await this.rotate(cookies);rotated=true;session=await this.validate(cookies);
     }
     if(previous?.account&&previous.account!==session.account)throw new AuthError('ACCOUNT_MISMATCH');
-    await atomicSave(this.file,{version:1,account:session.account,cookies,validatedAt:this.now(),refreshedAt:rotated?this.now():0,state:'ready'});
+    await atomicSave(this.file,{version:1,account:session.account,cookies,validatedAt:this.now(),refreshedAt:rotated?this.now():0,state:'ready',...(browserFingerprint?{browserFingerprint}:{})});
     return {state:'ready',account:session.account};
   }
   async ensure({refresh=false}={}){

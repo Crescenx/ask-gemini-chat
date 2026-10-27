@@ -1,0 +1,26 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Gemini MCP 登录状态</title>
+  <link rel="stylesheet" href="popup.css">
+  <script type="module" src="popup.js"></script>
+</head>
+<body>
+  <main>
+    <p class="eyebrow">GEMINI MCP</p>
+    <h1>登录与连接</h1>
+    <p class="intro">复用当前浏览器的登录，自动同步到本机。</p>
+    <dl>
+      <div><dt>本地连接</dt><dd id="connection">检查中</dd></div>
+      <div><dt>Gemini 登录</dt><dd id="login">检查中</dd></div>
+    </dl>
+    <p id="message" role="status" aria-live="polite">正在检查连接与登录…</p>
+    <p id="checked" class="meta"></p>
+    <button id="sync" type="button">立即同步</button>
+    <a href="https://gemini.google.com/app" target="_blank" rel="noopener">打开 Gemini</a>
+    <p class="meta">浏览器运行时自动检查登录状态。</p>
+  </main>
+</body>
+</html>

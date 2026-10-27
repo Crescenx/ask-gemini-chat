@@ -26,6 +26,12 @@ dependency there, and writes machine-specific files under ignored `.runtime/`:
 - `mcp.json`: the `ask-gemini-chat` entry for clients using `mcpServers`;
 - `codex.toml`: the equivalent Codex entry, with a 180-second tool timeout.
 
+Setup also registers the extension's Native Messaging host for the current user.
+Windows and WSL-to-Windows registration require PowerShell 7 (`pwsh.exe`). WSL
+launchers are generated automatically. Existing IDs from this checkout are kept;
+an unrelated checkout's host registration is not overwritten. No administrator
+privileges or manual registry editing are required.
+
 If the user already provides `GEMINI_HTTP_PYTHON`, setup checks that interpreter
 and the pinned dependency without modifying it. Do not set it accidentally to a
 base/system Python. Clear it to use the default project environment. Setup records
@@ -33,7 +39,21 @@ absolute Node/Python/server paths and existing proxy settings; it does not inven
 a proxy or write to any agent's global configuration. Keep `.runtime/` private.
 Rerun setup if this checkout or its runtime executables move.
 
+On upgrade, setup reuses recorded interpreter and runtime settings unless explicitly
+overridden in the environment. The project `.venv` receives pinned dependency updates;
+external interpreters are checked without modification. Existing MCP client settings,
+sessions and databases are not removed. Use `npm run update` for a fast-forward pull
+followed by setup; Git conflicts stop the update without resetting local work.
+
 ## 2. Sign in through the user's browser
+
+For the extension flow, load `extension/` as an unpacked extension at
+`chrome://extensions` and sign in to Gemini normally. Setup has already registered
+the bridge, and the popup must show connected and HTTP-validated login. Existing
+pre-auto-update extensions need one manual reload on their first upgrade; subsequent
+source changes are detected automatically. See [extension instructions](extension/README.md).
+Continue to the real model verification below; a successful popup alone is not model
+verification. The command-line alternative below remains available without an extension.
 
 Tell the user, in their language:
 

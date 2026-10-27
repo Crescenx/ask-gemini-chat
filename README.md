@@ -64,6 +64,8 @@ npm test
 
 ## 登录与会话维护
 
+**浏览器插件（开发版）：** 运行 `npm run setup` 自动注册本地桥接，再在 Chrome 加载 `extension/` 目录，即可自动同步登录并查看连接状态，无需复制插件 ID、编辑注册表或开启远程调试。老用户在原目录 `git pull --ff-only`、运行 setup，旧插件首次点一次重新加载；以后 `npm run update` 更新源码与依赖，插件自动检测并重载。已有登录、数据目录与 MCP 配置保留，详见 [开发版使用与升级](extension/README.md)。下面的命令行登录仍可独立使用。
+
 执行 `npm run auth -- login` 进行本地会话同步。在 Chrome 144+ 中正常登录 Gemini，打开 `chrome://inspect/#remote-debugging` 开启远程调试，并在 Chrome 弹窗中点击允许（Allow）。脚本仅读取 `__Secure-1PSID` 和 `__Secure-1PSIDTS` 两个必要的会话 Cookie，通过 HTTP 验证后立即断开连接，不会索要密码或打印 Cookie。同步完成后即可关闭远程调试。详见 [登录步骤与账号选择](INSTALL.md#2-sign-in-through-the-users-browser)。
 
 如果无法直接连接浏览器，可以使用该浏览器配置的默认 Google 账号登录 [Gemini](https://gemini.google.com) 后，从开发者工具中取出这两个 Cookie，存放在仓库外的私有 JSON 文件中：
