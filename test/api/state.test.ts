@@ -23,6 +23,17 @@ test('explicit upload rejection preserves its upstream status across retries and
   await check(); await check(); x.restart(); await check(); assert.equal(uploads, 1);
 });
 
+test('uncertain upload preserves a safe cause across retries and restart without resubmitting', async t => {
+  const x = await setup(t); let uploads = 0;
+  for (const cause of ['HTTP_TRANSPORT_ERROR', 'LOGIN_REQUIRED', 'private path or credential']) {
+    x.backend.upload = async () => { uploads++; throw Error(cause); };
+    const message = `Upload outcome is unknown (${cause.includes(' ') ? 'UPLOAD_FAILED' : cause})`;
+    const check = () => assert.rejects(x.service.upload(Buffer.from('fixture'), 'file.docx', 'default', cause), { code: 'OPERATION_UNCERTAIN', message });
+    await check(); await check(); x.restart(); await check();
+  }
+  assert.equal(uploads, 3);
+});
+
 test('concurrent duplicate send is one remote generation; key conflict and stale revision are distinct', async t => {
   const x = await setup(t);
   const chat = await x.service.createChat({ model: 'argon' }, 'create');

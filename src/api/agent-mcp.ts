@@ -36,14 +36,17 @@ export function createAgentMcpServer(service: ApiService, { localFiles = false }
     }, run.status === 'failed');
   }
   const server = new McpServer({ name: 'ask-gemini-chat', version: '0.1.0' });
-  const safe = (handler: (args: any) => Promise<any>) => async (args: any) => {
+  const safe = (handler: (args: any) => Promise<any>, upload = false) => async (args: any) => {
     try { return await handler(args); }
     catch (error) {
       const transportCode = error instanceof Error && ['NETWORK_ERROR', 'HTTP_TRANSPORT_ERROR', 'HTTP_TRANSPORT_UNAVAILABLE', 'LOGIN_REQUIRED'].includes(error.message) ? error.message : 'REQUEST_FAILED';
       return result({ error: error instanceof ApiError ? error.code : transportCode,
-        ...(error instanceof ApiError && error.code === 'UPLOAD_REJECTED' ? { message: error.message, http_status: error.status } : {}),
+        ...(error instanceof ApiError && ['UPLOAD_REJECTED', 'OPERATION_UNCERTAIN'].includes(error.code) ? { message: error.message } : {}),
+        ...(error instanceof ApiError && error.code === 'UPLOAD_REJECTED' ? { http_status: error.status } : {}),
         next: error instanceof ApiError && error.code === 'UPLOAD_REJECTED'
           ? 'Gemini explicitly rejected this upload. This request_id retains that rejection. Resolve the reported upstream issue before starting a new upload with a new request_id.'
+          : upload && error instanceof ApiError && error.code === 'OPERATION_UNCERTAIN'
+          ? 'This upload has no run_id. Keep this request_id: replay returns the saved outcome without uploading again. Inspect the reported cause; an unknown upload cannot be recovered by polling or changing IDs.'
           : 'Retry identical arguments with the SAME request_id, or query the known run_id. Never invent a new ID to recover an unknown outcome.' }, true);
     }
   };
@@ -89,6 +92,6 @@ export function createAgentMcpServer(service: ApiService, { localFiles = false }
       const uploaded = await service.upload({ path, size, sha256: hash.digest('hex') }, basename(args.path), 'default', `agent:${args.request_id}`);
       return result({ file_id: uploaded.id, name: uploaded.name, size: uploaded.size });
     } finally { await file.close(); if (directory) await rm(directory, { recursive: true, force: true }); }
-  }));
+  }, true));
   return server;
 }

@@ -2,7 +2,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import http from 'node:http';
 import {httpFetch} from './http-fetch.mjs';
-import {mkdtemp,open,rm} from 'node:fs/promises';
+import {mkdtemp,open,rm,writeFile} from 'node:fs/promises';
 import {tmpdir} from 'node:os';
 import {join} from 'node:path';
 
@@ -65,4 +65,26 @@ test('missing HTTP helper fails explicitly and an already aborted call does not 
     await assert.rejects(httpFetch('http://localhost/'),/HTTP_TRANSPORT_UNAVAILABLE/);
     await assert.rejects(httpFetch('http://localhost/',{signal:AbortSignal.abort()}),{name:'AbortError'});
   }finally{if(prior===undefined)delete process.env.GEMINI_HTTP_PYTHON;else process.env.GEMINI_HTTP_PYTHON=prior;}
+});
+
+test('disk upload parameters use UTF-8 even when Python stdin defaults to a Windows locale',async()=>{
+  const directory=await mkdtemp(join(tmpdir(),'http-upload-'));
+  const path=join(directory,'中文文档.docx'),content=Buffer.from('word fixture');
+  await writeFile(path,content);
+  let received;
+  const server=http.createServer(async(req,res)=>{
+    const chunks=[];for await(const chunk of req)chunks.push(chunk);
+    received=Buffer.concat(chunks);res.end('ok');
+  });
+  await new Promise(resolve=>server.listen(0,'127.0.0.1',resolve));
+  const previous=process.env.PYTHONIOENCODING;
+  process.env.PYTHONIOENCODING='gbk';
+  try{
+    const response=await httpFetch(`http://127.0.0.1:${server.address().port}`,{method:'POST',uploadFile:{path,name:'中文文档.docx',type:'application/vnd.openxmlformats-officedocument.wordprocessingml.document'}});
+    assert.equal(await response.text(),'ok');
+    assert(received.includes(Buffer.from('中文文档.docx')));assert(received.includes(content));
+  }finally{
+    if(previous===undefined)delete process.env.PYTHONIOENCODING;else process.env.PYTHONIOENCODING=previous;
+    server.closeAllConnections();await new Promise(resolve=>server.close(resolve));await rm(directory,{recursive:true,force:true});
+  }
 });

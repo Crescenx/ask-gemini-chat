@@ -160,6 +160,13 @@ test('local MCP uploads file bytes once, attaches by ID, and rejects changed or 
   const relative = await client.callTool({ name: 'upload_gemini_file', arguments: { request_id: 'relative', path: 'receipt.txt' } });
   assert.equal(relative.isError, true);
   assert.equal(uploads, 1);
+  backend.upload = async () => { throw Error('HTTP_TRANSPORT_ERROR'); };
+  const uncertainArgs = { ...args, request_id: 'uncertain-upload' };
+  const uncertain = await call('upload_gemini_file', uncertainArgs);
+  assert.equal(uncertain.error, 'OPERATION_UNCERTAIN');
+  assert.equal(uncertain.message, 'Upload outcome is unknown (HTTP_TRANSPORT_ERROR)');
+  assert.match(uncertain.next, /upload has no run_id/);
+  assert.deepEqual(await call('upload_gemini_file', uncertainArgs), uncertain);
   const handle = await open(path), prototype = Object.getPrototypeOf(handle);
   await handle.close();
   const original = prototype.createReadStream;

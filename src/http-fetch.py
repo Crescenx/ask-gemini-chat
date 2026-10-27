@@ -10,7 +10,8 @@ except ImportError:
 
 opened = False
 try:
-    request = json.load(sys.stdin)
+    # Node writes UTF-8 bytes regardless of the Windows console code page.
+    request = json.load(sys.stdin.buffer)
     multipart = None
     if request.get("uploadFile"):
         file = request["uploadFile"]
