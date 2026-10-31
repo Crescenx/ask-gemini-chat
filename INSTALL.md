@@ -35,8 +35,15 @@ privileges or manual registry editing are required.
 If the user already provides `GEMINI_HTTP_PYTHON`, setup checks that interpreter
 and the pinned dependency without modifying it. Do not set it accidentally to a
 base/system Python. Clear it to use the default project environment. Setup records
-absolute Node/Python/server paths and existing proxy settings; it does not invent
-a proxy or write to any agent's global configuration. Keep `.runtime/` private.
+absolute Node/Python/server paths and existing proxy settings. It discovers proxy
+environment settings, Windows system proxies and local proxy-process listeners
+(including Windows from WSL), macOS static system proxies, and direct access.
+It verifies a public Gemini page without cookies, uses the working route for npm/pip,
+then verifies it with the installed HTTP transport. The selected route is saved in
+the private data directory's `network.json`; diagnostics omit proxy credentials.
+System curl supplies pre-dependency HTTP/HTTPS/SOCKS probing. A standard-Python
+HTTP/HTTPS fallback is available when curl is absent. Setup does not change system
+proxy settings or any agent's global configuration. Keep `.runtime/` private.
 Rerun setup if this checkout or its runtime executables move.
 
 On upgrade, setup reuses recorded interpreter and runtime settings unless explicitly
@@ -79,7 +86,8 @@ The command validates the session against Gemini over HTTP before returning
 `state: ready`. An already valid saved session avoids Chrome entirely. After a
 successful sync, the connection closes; the user can disable Remote Debugging.
 Subsequent questions and session refreshes use HTTP. While running, the MCP process
-maintains the session in the background every ten minutes, with backoff for network
+rediscovers and validates the proxy route and maintains the session in the background
+every ten minutes, with backoff for network
 failures. If login later expires, repeat this step; the MCP process can stay running
 and picks up the renewed session without a restart. Keep the session directory on
 a local filesystem so cross-process SQLite locking works reliably.
@@ -192,6 +200,11 @@ it happens. Do not claim success from generated configuration alone.
 | `BROWSER_PROFILE_AMBIGUOUS` | Set the explicit Chrome User Data root; do not choose arbitrarily |
 | `ACCOUNT_MISMATCH` | Keep existing state; use a separate data directory for the new account |
 | `NETWORK_ERROR` | Inspect connectivity/proxy; do not extract more cookies to fix networking |
+| `PROXY_NO_WORKING_ROUTE` | Inspect `network.attempts`; all discovered proxies and direct access failed validation |
+| `PROXY_CONNECT_FAILED` / `PROXY_DNS_FAILED` | Repair the reported proxy address/port or start the proxy software |
+| `PROXY_AUTH_REQUIRED` | The proxy returned HTTP 407; fix proxy authentication |
+| `PROXY_TUNNEL_FAILED` / `PROXY_HANDSHAKE_FAILED` | Inspect the reported proxy stage, endpoint and HTTP/libcurl code |
+| `NETWORK_UNREACHABLE` | No proxy was found and direct access failed; check the network or start a proxy |
 | `PYTHON_DEPENDENCY_UNAVAILABLE` | Check generated absolute interpreter path and pinned requirements |
 | `DATABASE_LOCKED` | Use/stop the known existing server; never remove an active lock |
 

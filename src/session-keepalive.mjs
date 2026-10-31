@@ -1,7 +1,7 @@
 const INTERVAL=10*60*1000;
 
-export function startSessionKeepalive(auth,{notify=(_state)=>{},schedule=setTimeout,cancel=clearTimeout}={}){
-  let timer, running, stopped=false, failures=0, waiting=false;
+export function startSessionKeepalive(auth,{notify=(_state,_details)=>{},schedule=setTimeout,cancel=clearTimeout}={}){
+  let timer, running, stopped=false, failures=0, waiting=false,networkFailure;
   async function tick(){
     let next=INTERVAL;
     try{
@@ -13,7 +13,9 @@ export function startSessionKeepalive(auth,{notify=(_state)=>{},schedule=setTime
         });
         if(stored?.state!=='ready'){next=60000;return;}
       }
-      await auth.ensure();
+      await auth.ensure({detectProxy:true});
+      if(networkFailure)notify('NETWORK_READY',{network:auth.networkStatus});
+      networkFailure=undefined;
       if(waiting)notify('ready');
       waiting=false;failures=0;
     }catch(error){
@@ -21,6 +23,10 @@ export function startSessionKeepalive(auth,{notify=(_state)=>{},schedule=setTime
         if(!waiting)notify(error.code);
         waiting=true;next=60000;
       }else{
+        if(error.code?.startsWith('PROXY_')||error.code==='NETWORK_UNREACHABLE'){
+          if(networkFailure!==error.code)notify(error.code,{network:error.network,proxy_error:error.proxyError});
+          networkFailure=error.code;
+        }
         next=Math.min(60000*2**Math.min(failures++,6),60*60*1000);
       }
     }finally{

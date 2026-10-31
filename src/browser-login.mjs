@@ -105,7 +105,7 @@ export async function readBrowserLogin(auth, call) {
 }
 
 export async function browserLogin(auth, {discover = discoverBrowser, connect = connectBrowser, notify = () => {}, waitMs = 300000, sleep = ms => new Promise(resolve => setTimeout(resolve, ms))} = {}) {
-  try { const session = await auth.ensure(); return {state: 'ready', account: session.account, source: 'saved_session'}; }
+  try { const session = await auth.ensure({detectProxy:true}); return {state: 'ready', account: session.account, source: 'saved_session'}; }
   catch (error) { if (error.code !== 'LOGIN_REQUIRED') throw error; }
   const endpoint = await discover();
   notify('ALLOW_CHROME_CONNECTION');

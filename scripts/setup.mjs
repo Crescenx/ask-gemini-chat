@@ -4,6 +4,8 @@ import {mkdir, writeFile, access, readFile} from 'node:fs/promises';
 import {resolve, join, isAbsolute} from 'node:path';
 import {fileURLToPath} from 'node:url';
 import {registerExtension} from './prepare-extension.mjs';
+import {bootstrapProbe,createProxyRouter,discoverProxies,probeProxy,proxyEnvironmentFor,selectedProxy} from '../src/proxy.mjs';
+import {dataDirectory} from '../src/config.mjs';
 
 const root = fileURLToPath(new URL('..', import.meta.url));
 export function clientConfig(python, env = process.env, node = process.execPath, directory = root) {
@@ -24,8 +26,8 @@ export function upgradeEnvironment(previous,env=process.env){
   const saved=previous?.config?.env??{};
   return {...saved,...(previous?.python?{GEMINI_HTTP_PYTHON:previous.python}:{}),...env};
 }
-function run(command, args, capture = false) {
-  const result = spawnSync(command, args, {cwd: root, stdio: capture ? 'pipe' : 'inherit', encoding: 'utf8', timeout: 300000});
+function run(command, args, capture = false, env = process.env) {
+  const result = spawnSync(command, args, {cwd: root, env, stdio: capture ? 'pipe' : 'inherit', encoding: 'utf8', timeout: 300000});
   if (result.error || result.status !== 0) throw Error('SETUP_COMMAND_FAILED');
   return result.stdout?.trim();
 }
@@ -37,21 +39,27 @@ export async function setup() {
   try{previous=JSON.parse(await readFile(join(root,'.runtime','install.json'),'utf8'));}
   catch(error){if(error.code!=='ENOENT')throw Error('INVALID_INSTALLATION_STATE');}
   const env=upgradeEnvironment(previous);
-  run(process.execPath, [process.env.npm_execpath, 'ci']);
+  const networkFile=join(env.GEMINI_DATA_DIR||dataDirectory,'network.json');
+  const discover=()=>discoverProxies({env});
+  await createProxyRouter({discover,file:networkFile,test:proxy=>bootstrapProbe(proxy,{python:env.GEMINI_HTTP_PYTHON||(process.platform==='win32'?'python':'python3')})}).refresh();
+  const route=await selectedProxy('https://gemini.google.com/app',{file:networkFile});
+  const dependencyEnv=proxyEnvironmentFor(env,route.proxy);
+  run(process.execPath, [process.env.npm_execpath, 'ci'],false,dependencyEnv);
   const managedPython=join(root, '.venv', process.platform === 'win32' ? 'Scripts/python.exe' : 'bin/python');
   let python = env.GEMINI_HTTP_PYTHON||managedPython;
   if (resolve(python)===resolve(managedPython)) {
     try { await access(python); }
     catch {
       const bootstrap = process.platform === 'win32' ? 'python' : 'python3';
-      run(bootstrap, ['-c', 'import sys; assert sys.version_info >= (3, 10)']);
-      run(bootstrap, ['-m', 'venv', join(root, '.venv')]);
+      run(bootstrap, ['-c', 'import sys; assert sys.version_info >= (3, 10)'],false,dependencyEnv);
+      run(bootstrap, ['-m', 'venv', join(root, '.venv')],false,dependencyEnv);
     }
-    run(python, ['-m', 'pip', 'install', '-r', join(root, 'requirements-http.txt')]);
+    run(python, ['-m', 'pip', 'install', '-r', join(root, 'requirements-http.txt')],false,dependencyEnv);
   }
   // An explicit interpreter is checked, never silently modified.
   const checked = run(python, ['-c', 'import sys; from importlib.metadata import version; assert sys.version_info >= (3, 10); assert version("curl_cffi") == "0.16.3"; print(sys.executable)'], true);
   python = resolve(checked);
+  const network=await createProxyRouter({discover,file:networkFile,test:proxy=>probeProxy(proxy,{python})}).refresh();
   const config = clientConfig(python,env);
   const directory = join(root, '.runtime');
   await mkdir(directory, {recursive: true, mode: 0o700});
@@ -59,9 +67,9 @@ export async function setup() {
   await writeFile(join(directory, 'mcp.json'), JSON.stringify({mcpServers: {'ask-gemini-chat': config}}, null, 2) + '\n', {mode: 0o600});
   await writeFile(join(directory, 'codex.toml'), codexConfig(config), {mode: 0o600});
   const extension=await registerExtension();
-  console.log(JSON.stringify({state: 'installed', configFiles: ['.runtime/mcp.json', '.runtime/codex.toml'],extension,
+  console.log(JSON.stringify({state: 'installed', configFiles: ['.runtime/mcp.json', '.runtime/codex.toml'],extension,network,
     next:'Load extension/ in Chrome (reload once for older extensions). Existing login and MCP client settings are preserved. For first-time MCP registration and verification, see INSTALL.md.'}));
 }
 if (process.argv[1] && resolve(process.argv[1]) === fileURLToPath(import.meta.url)) {
-  setup().catch(error => { console.error(JSON.stringify({state: 'error', code: error.message, next: 'Check Node 24+, Python 3.10+, npm and venv support. If GEMINI_HTTP_PYTHON is set, install requirements-http.txt into that explicit environment or unset it to create a local .venv.'})); process.exitCode = 1; });
+  setup().catch(error => { console.error(JSON.stringify({state: 'error', code: error.message,...(error.network?{network:error.network}:{}), next: error.network?'No verified network route. Check the proxy errors and start or repair the proxy, then rerun setup.':'Check Node 24+, Python 3.10+, npm and venv support. If GEMINI_HTTP_PYTHON is set, install requirements-http.txt into that explicit environment or unset it to create a local .venv.'})); process.exitCode = 1; });
 }

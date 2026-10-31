@@ -63,8 +63,8 @@ export class NativeBackend implements Backend {
       else if (parsed.text !== lastText) observe({ type: 'text.replace', text: parsed.text });
       lastText = parsed.text;
       if (state.done) {
-        observe({ type: 'diagnostics', diagnostics: { transportError: state.error, exhausted: !!state.exhausted, complete: parsed.complete, receivedChars: state.receivedChars ?? state.raw?.length ?? 0, model: state.model } });
-        if (state.error && ['authentication', 'proof'].includes(state.stage)) throw new ApiError('GENERATION_REJECTED', state.error, 401);
+        observe({ type: 'diagnostics', diagnostics: { transportError: state.error, exhausted: !!state.exhausted, complete: parsed.complete, receivedChars: state.receivedChars ?? state.raw?.length ?? 0, model: state.model, elapsedMs: state.elapsedMs, httpStatus: state.status, transport: state.transportDiagnostics, proxyError: state.proxyError, network: state.network } });
+        if (state.error && ['authentication', 'proof'].includes(state.stage)) throw new ApiError('GENERATION_REJECTED', state.error, state.error.startsWith('PROXY_')||state.error==='NETWORK_UNREACHABLE'?503:401);
         const rejection = state.rejection ?? protocolError(state.raw ?? '');
         if (rejection) {
           const code = !observed && rejection.rpcCode === 9 && Number.isInteger(rejection.code) ? 'GENERATION_REJECTED' : 'UPSTREAM_UNCERTAIN';

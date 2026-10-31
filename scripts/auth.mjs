@@ -8,7 +8,8 @@ const auth=new SessionAuth({file:sessionFile});
 try{
   if(command==='login'){
     const {browserLogin}=await import('../src/browser-login.mjs');
-    console.log(JSON.stringify(await browserLogin(auth,{notify:code=>console.error(JSON.stringify({state:'waiting_for_user',code,next:guidance(code)}))})));
+    const result=await browserLogin(auth,{notify:code=>console.error(JSON.stringify({state:'waiting_for_user',code,next:guidance(code)}))});
+    console.log(JSON.stringify({...result,network:auth.networkStatus}));
   }else if(command==='import'){
     if(!input)throw new AuthError('COOKIE_FILE_REQUIRED');
     const raw=input==='-'?await new Promise((resolve,reject)=>{let data='';process.stdin.setEncoding('utf8');process.stdin.on('data',x=>{data+=x;if(data.length>100000){reject(new AuthError('INPUT_TOO_LARGE'));process.stdin.destroy();}});process.stdin.on('end',()=>resolve(data));process.stdin.on('error',reject);}):await fs.readFile(input,'utf8');
@@ -16,13 +17,14 @@ try{
     let parsed;try{parsed=JSON.parse(raw);}catch{throw new AuthError('INVALID_COOKIE_JSON');}
     console.log(JSON.stringify(await auth.import(parsed)));
   }else if(command==='refresh'){
-    const session=await auth.ensure({refresh:true});console.log(JSON.stringify({state:'ready',account:session.account}));
+    const session=await auth.ensure({refresh:true,detectProxy:true});console.log(JSON.stringify({state:'ready',account:session.account,network:auth.networkStatus}));
   }else if(command==='status'){
     const status=await auth.status();console.log(JSON.stringify(status));if(status.state!=='ready')process.exitCode=2;
   }else throw new AuthError('USE_LOGIN_IMPORT_STATUS_OR_REFRESH');
-}catch(e){console.error(JSON.stringify({state:'error',code:e instanceof AuthError?e.code:'LOCAL_ERROR',next:guidance(e.code)}));process.exitCode=2;}
+}catch(e){console.error(JSON.stringify({state:'error',code:e instanceof AuthError?e.code:'LOCAL_ERROR',...(e.network?{network:e.network}:{}),...(e.proxyError?{proxy_error:e.proxyError}:{}),next:guidance(e.code)}));process.exitCode=2;}
 
 function guidance(code) {
+  if(code?.startsWith('PROXY_')||code==='NETWORK_UNREACHABLE')return 'Automatic proxy discovery found no usable route. Inspect network.attempts or proxy_error for the failed endpoint and cause. Start or repair your proxy and retry; keep the existing login and request IDs.';
   const messages = {
     ENABLE_CHROME_REMOTE_DEBUGGING: 'In your own Chrome 144+, open chrome://inspect/#remote-debugging and enable Remote Debugging. Open https://gemini.google.com/app and sign in, then rerun login.',
     ALLOW_CHROME_CONNECTION: 'Confirm Allow in Chrome once. Keep this process running; it reuses this connection while you sign in.',

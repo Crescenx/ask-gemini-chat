@@ -10,6 +10,10 @@ import { createAgentMcpServer } from '../../src/api/agent-mcp.ts';
 import { ApiService } from '../../src/api/service.ts';
 import { ApiError } from '../../src/api/types.ts';
 import { Remote, until } from './helpers.ts';
+import {NativeBackend} from '../../src/api/native.ts';
+import {WebAPI} from '../../src/web-client.mjs';
+import {httpFetch} from '../../src/http-fetch.mjs';
+import {createServer} from 'node:http';
 
 async function setup(t: any) {
   const dir = await mkdtemp(join(tmpdir(), 'agent-mcp-'));
@@ -62,6 +66,18 @@ test('slow and uncertain answers keep their original run and recover only by his
   assert.equal(backend.generations.length, 1);
 });
 
+test('agent MCP exposes proxy discovery failure separately and never submits the generation',async t=>{
+  const {backend,call}=await setup(t);let sent=0;
+  const network={state:'error',code:'PROXY_NO_WORKING_ROUTE',attempts:[{endpoint:'http://127.0.0.1:43210',source:'windows-system',code:'PROXY_CONNECT_FAILED'}],warnings:[]};
+  const native=new NativeBackend({pollMs:1,api:new WebAPI({auth:{ensure:async()=>{throw Object.assign(Error(network.code),{code:network.code,network});}} as any,fetchImpl:async()=>{sent++;throw Error('must not send');}})});
+  backend.generate=(...args)=>native.generate(...args);
+  const result=await call('ask_gemini_chat',{request_id:'proxy-failure',prompt:'fixture',wait_ms:1000});
+  assert.equal(result.status,'failed');assert.equal(result.proxy_error.code,'PROXY_NO_WORKING_ROUTE');
+  assert.equal(result.proxy_error.attempts[0].code,'PROXY_CONNECT_FAILED');assert.equal(sent,0);
+  const replay=await call('get_gemini_result',{run_id:result.run_id,wait_ms:0});
+  assert.deepEqual(replay.proxy_error,result.proxy_error);assert.equal(sent,0);
+});
+
 test('failed history recovery returns the original run, corrected partial text and both errors',async t=>{
   const {backend,service,call}=await setup(t);
   let calls=0;
@@ -69,7 +85,8 @@ test('failed history recovery returns the original run, corrected partial text a
     calls++;observe({type:'text.delta',delta:'broken link'});
     observe({type:'text.replace',text:'[project](https://example.com)'});
     observe({type:'text.delta',delta:'\nNext paragraph'});
-    throw new ApiError('UPSTREAM_UNCERTAIN','HTTP_TRANSPORT_ERROR');
+    observe({type:'diagnostics',diagnostics:{transportError:'HTTP_TRANSPORT_ERROR_CURL_18',exhausted:false,complete:false,receivedChars:528}});
+    throw new ApiError('UPSTREAM_UNCERTAIN','HTTP_TRANSPORT_ERROR_CURL_18');
   };
   backend.recover=async()=>{throw new ApiError('UPSTREAM_HISTORY_REJECTED','Upstream history RPC 5, BardErrorInfo 1167');};
   const first=await call('ask_gemini_chat',{request_id:'partial',prompt:'fixture',wait_ms:1000});
@@ -77,8 +94,39 @@ test('failed history recovery returns the original run, corrected partial text a
   assert.equal(r.isError,false);assert.equal(r.run_id,first.run_id);assert.equal(r.status,'uncertain');
   assert.equal(r.text,undefined);assert.equal(r.partial.complete,false);
   assert.equal(r.partial.text,'[project](https://example.com)\nNext paragraph');
-  assert.equal(r.error.message,'HTTP_TRANSPORT_ERROR');assert.match(r.recovery_error.message,/1167/);
+  assert.equal(r.error.message,'HTTP_TRANSPORT_ERROR_CURL_18');assert.match(r.recovery_error.message,/1167/);
+  assert.equal(r.diagnostics.transportError,'HTTP_TRANSPORT_ERROR_CURL_18');
   assert.equal(service.getRun(r.run_id).partial?.text,r.partial.text);assert.equal(calls,1);
+});
+
+test('a real Python stream failure reaches persisted MCP diagnostics with exception, curl code and timings',async t=>{
+  const {backend,service,call}=await setup(t),logs:any[]=[];let sends=0;
+  t.mock.method(console,'error',(line:string)=>logs.push(JSON.parse(line)));
+  const preamble=JSON.stringify([['wrb.fr',null,JSON.stringify([null,['c_abcd','r_3']])]])+'\n';
+  const history=JSON.stringify([['wrb.fr','hNvQHb',null,null,null,[5,null,[['BardErrorInfo',[1167]]]]]])+'\n';
+  const server=createServer((req,res)=>{
+    if(req.url==='/history'){res.end(history);return;}
+    sends++;res.writeHead(200,{'content-length':10000});
+    res.write(preamble,()=>res.socket?.destroy());
+  });
+  await new Promise<void>(resolve=>server.listen(0,'127.0.0.1',resolve));
+  t.after(async()=>{server.closeAllConnections();await new Promise<void>(resolve=>server.close(()=>resolve()));});
+  const address=server.address();assert(address&&typeof address!=='string');
+  const root=`http://127.0.0.1:${address.port}`;
+  const api=new WebAPI({auth:{ensure:async()=>({cookies:{},accessToken:'fixture',build:'fixture',sessionId:'fixture'})} as any,
+    fetchImpl:(url:any,options:any)=>httpFetch(root+(String(url).includes('StreamGenerate')?'/stream':'/history'),options)});
+  const native=new NativeBackend({api,pollMs:1});
+  backend.generate=(...args)=>native.generate(...args);backend.recover=(...args)=>native.recover(...args);
+  const initial=await call('ask_gemini_chat',{request_id:'real-transport-diagnostics',prompt:'fixture',wait_ms:1000});
+  const result=await call('get_gemini_result',{run_id:initial.run_id,wait_ms:0});
+  assert.equal(result.status,'uncertain');assert.equal(result.diagnostics.receivedChars,preamble.length);
+  const transport=result.diagnostics.transport;
+  assert.equal(transport.curlCode,18);assert.match(transport.pythonException,/^[A-Za-z_][A-Za-z0-9_]*$/);
+  assert.equal(transport.pythonStage,'body');assert(transport.pythonElapsedMs>=0);assert(transport.elapsedMs>=0);
+  assert(result.diagnostics.elapsedMs>=0);assert.equal(result.recovery_error.code,'UPSTREAM_HISTORY_REJECTED');
+  assert.deepEqual(service.getRun(result.run_id).diagnostics?.transport,transport);
+  assert.equal(logs[0].transportId,transport.transportId);assert.equal(logs[0].pythonException,transport.pythonException);
+  assert.equal(sends,1);
 });
 
 test('agent chooses a fixed chat mode; temporary retries, polling and continuation never fetch history', async t => {
@@ -167,6 +215,12 @@ test('local MCP uploads file bytes once, attaches by ID, and rejects changed or 
   assert.equal(uncertain.message, 'Upload outcome is unknown (HTTP_TRANSPORT_ERROR)');
   assert.match(uncertain.next, /upload has no run_id/);
   assert.deepEqual(await call('upload_gemini_file', uncertainArgs), uncertain);
+  const proxyError={code:'PROXY_CONNECT_FAILED',endpoint:'http://127.0.0.1:43210',source:'fixture',curlCode:7};
+  backend.upload=async()=>{throw Object.assign(Error(proxyError.code),{proxyError});};
+  const proxyArgs={...args,request_id:'proxy-upload'};
+  const proxyFailure=await call('upload_gemini_file',proxyArgs);
+  assert.deepEqual(proxyFailure.proxy_error,proxyError);
+  assert.deepEqual((await call('upload_gemini_file',proxyArgs)).proxy_error,proxyError);
   const handle = await open(path), prototype = Object.getPrototypeOf(handle);
   await handle.close();
   const original = prototype.createReadStream;

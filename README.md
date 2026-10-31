@@ -88,9 +88,13 @@ npm run auth -- status
 
 **后台保活与重连：**
 
-本地共享后台会在启动时及之后每 10 分钟通过 HTTP 检查并维护一次会话，期间不访问或控制浏览器，也不发送生成请求。遇到临时网络故障会按 1 分钟到 1 小时的退避策略静默重试；所有客户端退出且生成完成后，后台自动退出。若后台提示登录失效，或手动执行 `npm run auth -- refresh` 报 `LOGIN_REQUIRED`，重新运行 `npm run auth -- login` 即可恢复，无需重启 MCP 服务。
+本地共享后台会在启动时及之后每 10 分钟通过 HTTP 检查并维护一次会话，期间不访问或控制浏览器，也不发送生成请求。遇到临时网络故障会按 1 分钟到 1 小时的退避策略重试；代理故障与恢复单独记录。所有客户端退出且生成完成后，后台自动退出。若后台提示登录失效，或手动执行 `npm run auth -- refresh` 报 `LOGIN_REQUIRED`，重新运行 `npm run auth -- login` 即可恢复，无需重启 MCP 服务。
 
 **多会话与热加载：** 同一数据库的多个 MCP 客户端自动连接同一个后台，共享聊天、文件和请求记录；关闭一个客户端不会打断其他客户端或正在进行的生成。后台检测到业务源码更新后，会在正在处理的请求和生成全部完成时退出；已有客户端下一次调用自动启动新版，stdio 连接保持不变。更新等待期间仍可提问和查询。stdio 入口本身、运行环境或客户端配置变更仍需重连客户端。首次从旧版升级时，需让旧的直连数据库进程完成请求并退出，再重连一次。
+
+**自动代理：** 安装、登录同步、显式刷新/状态检查及每轮后台保活都会重新发现并验证代理。候选来自代理环境变量、Windows 系统代理（由系统解析自动代理配置）、Windows/WSL/Linux 上常见代理软件的实际监听端口，以及 macOS 静态系统代理；也会验证直连。没有固定代理端口列表。探测只访问不带登录凭据的 Gemini 公开页面，成功后才用于认证、生成和上传。安装时先用系统 curl 探测，让 npm/pip 走选定路由，再用实际的 `curl_cffi` 通道复核；无系统 curl 时提供标准 Python HTTP/HTTPS 探测，SOCKS 引导安装需要系统 curl。
+
+经过验证的路由保存在私有数据目录的 `network.json`，后续 HTTP 请求读取最新选择，切换代理软件或端口后可在下一轮保活时自动切换；普通问答和历史分页复用已验证路由。路由切换只影响后续请求，生成或上传中途失败仍保留原请求身份。不会修改 Windows 系统代理或其他软件的配置。可用 `npm run auth -- status` 立即触发重新发现，查看脱敏后的所选端点和失败候选。
 
 ## MCP 工具与用法
 
@@ -148,6 +152,26 @@ npm run auth -- status
 网络波动或调用中断需要重试时，**必须保持相同的 `request_id` 和完全一致的参数**，以避免触发模型重复生成；同一个 `request_id` 改参数会报 `IDEMPOTENCY_CONFLICT`。当正常聊天返回 `uncertain` 时，请按原 `run_id` 查询恢复，不要重新发一条新提问。
 
 生成中或中断后，工具会通过 `partial.text` 提供已收到的最新正文，并标记 `partial.complete: false`。这份文字可能继续修改；完整结果使用 `completed` 状态和 `text` 字段。历史查询失败时，原请求与部分正文仍会返回，`recovery_error` 保留具体错误。`diagnostics` 记录传输错误、流完成状态、累计接收字符数和上游返回的模型标识，便于定位故障。
+
+`HTTP_TRANSPORT_ERROR_CURL_<数字>` 保留 libcurl 的错误码；HTTP 辅助进程异常退出且没有返回结构化错误时，记录 `HTTP_TRANSPORT_ERROR_EXIT_<退出码>` 或 `HTTP_TRANSPORT_ERROR_SIGNAL_<信号>`。这些错误不会自动重发生成或上传，也不输出可能包含私有 URL 的底层异常文本。旧版本只记录 `HTTP_TRANSPORT_ERROR`，已经保存的旧错误无法补回底层原因。
+
+Python 异常诊断位于 `diagnostics.transport`：`pythonException` 为异常类名，`curlCode` 为可用的 libcurl 数字错误码，`pythonElapsedMs` 为 Python 辅助进程的耗时，`pythonStage` 标明失败发生在依赖加载、输入解析、请求建立或读取响应正文阶段。`elapsedMs` 是 Node 侧传输耗时，外层 `diagnostics.elapsedMs` 是整次生成耗时。每次传输失败还会向服务 stderr 写一条 `event: "http.transport_error"` 的结构化日志，包含时间戳及 `transportId`，可与持久化的任务诊断对应；共享后台将 stderr 保存到数据库旁的 `.mcp.log`。日志仅保留请求来源站点，不记录完整 URL、异常原文、堆栈或 Cookie。辅助进程直接崩溃时可能没有 Python 异常，仍保留退出码或信号。
+
+生成诊断还包含 `elapsedMs`、`httpStatus` 和网络探测结果 `network`。传输失败时，`transport.route` 显示本次请求选定的脱敏端点及来源；`proxyEnvironment` 显示继承的代理环境，`noProxyConfigured` 表示环境中是否有绕过规则。显式选择的路由覆盖这些环境代理和绕过规则；直连通过探测验证，也可能由系统 TUN 承载。
+
+代理问题单独列在 `proxy_error`（安装/登录报告中的 `network.attempts` 逐一记录候选失败）：
+
+| 错误码 | 含义 |
+| --- | --- |
+| `PROXY_NO_WORKING_ROUTE` | 检测到代理，但代理候选及直连均未通过目标站点验证 |
+| `PROXY_CONNECT_FAILED` | 连接选定代理失败，常见于旧端口已关闭 |
+| `PROXY_DNS_FAILED` | 无法解析代理主机 |
+| `PROXY_AUTH_REQUIRED` | 代理返回 HTTP 407，需要代理认证 |
+| `PROXY_TUNNEL_FAILED` | 代理拒绝建立 CONNECT 隧道，附具体 HTTP 状态 |
+| `PROXY_HANDSHAKE_FAILED` | SOCKS 等代理握手失败 |
+| `NETWORK_UNREACHABLE` | 未发现代理，直连验证失败 |
+
+代理发现警告使用 `PROXY_SYSTEM_DISCOVERY_FAILED`、`PROXY_LISTENER_DISCOVERY_FAILED` 或 `PROXY_INVALID_URL`；仍会尝试其他候选。收到上游数据后的断流继续记录为传输错误，并附上代理路由信息。代理失败不会被报告成登录过期，也不会触发自动重发问题或上传。
 
 ## 本地存储与隐私
 

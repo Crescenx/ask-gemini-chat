@@ -51,3 +51,12 @@ test('shutdown drains in-flight refresh without scheduling another timer',async(
   await Promise.resolve();assert.equal(drained,false);
   resolve();await running;await stopping;assert.equal(schedules,1);
 });
+
+test('proxy failure is announced once, retries maintenance, and reports recovery',async()=>{
+  let broken=true;
+  const h=harness({ensure:async()=>{if(broken)throw Object.assign(Error(),{code:'PROXY_NO_WORKING_ROUTE',network:{state:'error'}});}});
+  await h.run();await h.run();assert.deepEqual(h.notices,['PROXY_NO_WORKING_ROUTE']);
+  assert.equal(h.ms,120000);broken=false;
+  await h.run();assert.deepEqual(h.notices,['PROXY_NO_WORKING_ROUTE','NETWORK_READY']);assert.equal(h.ms,600000);
+  await h.stop();
+});

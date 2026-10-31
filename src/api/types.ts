@@ -25,7 +25,11 @@ export type RunInfo = {
   error?: { code: string; message: string };
   recoveryError?: { code: string; message: string };
   partial?: { text: string };
-  diagnostics?: { transportError?: string; exhausted: boolean; complete: boolean; receivedChars: number; model?: string };
+  diagnostics?: { transportError?: string; exhausted: boolean; complete: boolean; receivedChars: number; model?: string; elapsedMs?: number; httpStatus?: number;
+    transport?: { proxyEnvironment: Record<string, string>; noProxyConfigured: boolean; elapsedMs: number; route?: {endpoint:string;source:string};
+      pythonException?: string; curlCode?: number; pythonElapsedMs?: number; pythonStage?: string; transportId?: string };
+    proxyError?: {code:string;endpoint?:string;source?:string;curlCode?:number;httpStatus?:number};
+    network?: {state:string;code?:string;attempts:{endpoint:string;source:string;code:string}[];warnings:{source:string;code:string}[]} };
 };
 export type RunEvent = { id: number; runId: string; type: string; at: string; [key: string]: unknown };
 export type Input = { text: string; files?: string[] };
@@ -62,6 +66,8 @@ export class ApiError extends Error {
   code: string;
   status: number;
   runId?: string;
+  proxyError?: unknown;
+  network?: unknown;
   constructor(code: string, message = code, status = 409, runId?: string) {
     super(message); this.name = 'ApiError'; this.code = code; this.status = status; this.runId = runId;
   }

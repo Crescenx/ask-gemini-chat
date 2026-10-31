@@ -16,6 +16,21 @@ test('cookie import filters domains and rejects ambiguity and header injection',
   assert.throws(()=>importCookies({'__Secure-1PSID':'bad\r\nheader'}),/INVALID_COOKIE/);
   assert.throws(()=>importCookies([{name:'__Secure-1PSID',value:'a'},{name:'__Secure-1PSID',value:'b'}]),/AMBIGUOUS/);
 });
+
+test('login and every maintenance pass prepare the network; proxy failure preserves the saved session',()=>fixture(async file=>{
+  let checks=0,broken=false;
+  const network={state:'error',code:'PROXY_NO_WORKING_ROUTE',attempts:[{endpoint:'http://127.0.0.1:43210',source:'fixture',code:'PROXY_CONNECT_FAILED'}],warnings:[]};
+  const auth=new SessionAuth({file,fetchImpl:async()=>new Response(page()),prepareNetwork:async()=>{
+    checks++;if(broken)throw Object.assign(Error(network.code),{code:network.code,network});return {state:'ready'};
+  }});
+  await auth.import({'__Secure-1PSID':'test-secret'});assert.equal(checks,1);
+  await Promise.all([auth.ensure({detectProxy:true}),auth.ensure({detectProxy:true})]);assert.equal(checks,2);
+  await auth.ensure();assert.equal(checks,2);
+  await auth.ensure({detectProxy:true});assert.equal(checks,3);
+  const saved=await fs.readFile(file,'utf8');broken=true;
+  const status=await auth.status();assert.equal(status.code,'PROXY_NO_WORKING_ROUTE');assert.deepEqual(status.network,network);
+  assert.equal(await fs.readFile(file,'utf8'),saved);
+}));
 test('initial import validates directly over HTTP, stores private cookies and binds account',()=>fixture(async file=>{
   let identity='test@example.invalid';const requests=[];
   const auth=new SessionAuth({file,fetchImpl:async(url,options)=>{requests.push({url,options});return new Response(page(identity));}});

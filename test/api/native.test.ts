@@ -160,10 +160,11 @@ test('temporary streams reject interruption, incomplete, stale and mismatched re
 
 test('text replacements and original transport diagnostics survive an interrupted stream',async()=>{
   const texts=['[project](https://exa','[project](https://example.com)\n','[project](https://example.com)\nMore'];
+  const transport={proxyEnvironment:{HTTPS_PROXY:'http://127.0.0.1:4290'},noProxyConfigured:false,elapsedMs:100,pythonException:'ConnectionError',curlCode:56,pythonElapsedMs:90,pythonStage:'body',transportId:'fixture-transport'};
   let index=0,text='';const events:Observation[]=[];
   const api={start:async()=>request.id,poll:async()=>{
     const i=Math.min(index++,texts.length-1);
-    return {done:i===2,error:i===2?'RESPONSE_FRAME_SIZE_LIMIT':undefined,receivedChars:1010000,model:'95a4c0abcba24364',
+    return {done:i===2,error:i===2?'RESPONSE_FRAME_SIZE_LIMIT':undefined,receivedChars:1010000,model:'95a4c0abcba24364',transportDiagnostics:transport,elapsedMs:150,status:200,
       response:{text:texts[i],metadata:['c_abcd','r_3','rc_3'],complete:false}};
   }};
   // A rewrite removes an earlier Markdown fragment, rather than only appending.
@@ -175,6 +176,7 @@ test('text replacements and original transport diagnostics survive an interrupte
   const d=events.find(e=>e.type==='diagnostics');
   assert(d?.type==='diagnostics');assert.equal(d.diagnostics.transportError,'RESPONSE_FRAME_SIZE_LIMIT');
   assert.equal(d.diagnostics.model,'95a4c0abcba24364');
+  assert.deepEqual(d.diagnostics.transport,transport);assert.equal(d.diagnostics.elapsedMs,150);assert.equal(d.diagnostics.httpStatus,200);
 });
 
 test('history preserves upstream RPC and Bard error codes',async()=>{

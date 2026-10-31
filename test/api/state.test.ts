@@ -25,13 +25,17 @@ test('explicit upload rejection preserves its upstream status across retries and
 
 test('uncertain upload preserves a safe cause across retries and restart without resubmitting', async t => {
   const x = await setup(t); let uploads = 0;
-  for (const cause of ['HTTP_TRANSPORT_ERROR', 'LOGIN_REQUIRED', 'private path or credential']) {
-    x.backend.upload = async () => { uploads++; throw Error(cause); };
+  for (const cause of ['HTTP_TRANSPORT_ERROR', 'LOGIN_REQUIRED', 'private path or credential','PROXY_CONNECT_FAILED']) {
+    const proxyError=cause==='PROXY_CONNECT_FAILED'?{code:cause,endpoint:'http://127.0.0.1:43210',source:'fixture',curlCode:7}:undefined;
+    x.backend.upload = async () => { uploads++; throw Object.assign(Error(cause),{proxyError}); };
     const message = `Upload outcome is unknown (${cause.includes(' ') ? 'UPLOAD_FAILED' : cause})`;
-    const check = () => assert.rejects(x.service.upload(Buffer.from('fixture'), 'file.docx', 'default', cause), { code: 'OPERATION_UNCERTAIN', message });
+    const check = () => assert.rejects(x.service.upload(Buffer.from('fixture'), 'file.docx', 'default', cause), error=>{
+      assert.equal((error as ApiError).code,'OPERATION_UNCERTAIN');assert.equal((error as Error).message,message);
+      assert.deepEqual((error as ApiError).proxyError,proxyError);return true;
+    });
     await check(); await check(); x.restart(); await check();
   }
-  assert.equal(uploads, 3);
+  assert.equal(uploads, 4);
 });
 
 test('concurrent duplicate send is one remote generation; key conflict and stale revision are distinct', async t => {

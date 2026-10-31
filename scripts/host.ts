@@ -12,7 +12,7 @@ try {
   let stop = async () => {};
   const host = await startSharedHost({ database: databaseFile, backend, revision,
     configuration: runtimeConfiguration(), currentRevision: () => sourceRevision(projectDirectory), stop: () => stop() });
-  stop = startSessionKeepalive(backend.api.auth, { notify: (state: string) => console.error(JSON.stringify({ auth: state })) });
+  stop = startSessionKeepalive(backend.api.auth, { notify: (state: string, details?: object) => console.error(JSON.stringify({ [state.startsWith('PROXY_') || state.startsWith('NETWORK_') ? 'network' : 'auth']: state, ...details })) });
   process.once('SIGTERM', () => { void host.close(); });
   process.once('SIGINT', () => { void host.close(); });
 } catch (error: any) { console.error(error.code ?? error.message); process.exitCode = error.code === 'DATABASE_LOCKED' ? 75 : 1; }

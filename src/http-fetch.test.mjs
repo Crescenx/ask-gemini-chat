@@ -1,10 +1,40 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import http from 'node:http';
-import {httpFetch} from './http-fetch.mjs';
+import {httpFetch,proxyEnvironment} from './http-fetch.mjs';
 import {mkdtemp,open,rm,writeFile} from 'node:fs/promises';
 import {tmpdir} from 'node:os';
 import {join} from 'node:path';
+
+test('proxy diagnostics show endpoints without credentials, query strings or unrelated environment',()=>{
+  assert.deepEqual(proxyEnvironment({HTTPS_PROXY:'http://user:secret@127.0.0.1:4290/private?token=secret',
+    ALL_PROXY:'socks5h://user:secret@[::1]:7890/path',http_proxy:'localhost:8080',https_proxy:'http://bad host',OTHER:'secret'}),
+    {HTTPS_PROXY:'http://127.0.0.1:4290',http_proxy:'http://localhost:8080',ALL_PROXY:'socks5h://[::1]:7890',https_proxy:'invalid'});
+});
+
+test('explicit automatic routes override inherited bypass rules and identify proxy auth and connection failures',async()=>{
+  let calls=0;
+  const proxy=http.createServer((req,res)=>{calls++;assert.equal(req.url,'http://origin.invalid/check');res.end('through proxy');});
+  proxy.on('connect',(req,socket)=>{calls++;socket.end('HTTP/1.1 407 Proxy Authentication Required\r\nContent-Length: 0\r\n\r\n');});
+  await new Promise(resolve=>proxy.listen(0,'127.0.0.1',resolve));
+  const port=proxy.address().port,proxyRoute={proxy:`http://127.0.0.1:${port}`,source:'fixture'};
+  const prior=process.env.NO_PROXY;process.env.NO_PROXY='*';
+  try{
+    const response=await httpFetch('http://origin.invalid/check',{proxyRoute});
+    assert.equal(await response.text(),'through proxy');
+    await assert.rejects(httpFetch('https://origin.invalid/check',{proxyRoute}),error=>{
+      assert.equal(error.message,'PROXY_AUTH_REQUIRED');assert.equal(error.proxyError.httpStatus,407);
+      assert.equal(error.proxyError.endpoint,proxyRoute.proxy);return true;
+    });
+    assert.equal(calls,2);
+  }finally{
+    if(prior===undefined)delete process.env.NO_PROXY;else process.env.NO_PROXY=prior;
+    proxy.closeAllConnections();await new Promise(resolve=>proxy.close(resolve));
+  }
+  await assert.rejects(httpFetch('https://origin.invalid/check',{proxyRoute}),error=>{
+    assert.equal(error.message,'PROXY_CONNECT_FAILED');assert.equal(error.proxyError.curlCode,7);return true;
+  });
+});
 
 test('HTTP transport preserves multipart bytes, streams, cookies and status; never follows or retries',async()=>{
   let calls=0,finish;
@@ -37,8 +67,75 @@ test('HTTP transport preserves multipart bytes, streams, cookies and status; nev
     const abort=new AbortController(),pending=await httpFetch(root+'/wait',{signal:abort.signal});
     const body=pending.body.getReader();await body.read();abort.abort();await assert.rejects(body.read(),{name:'AbortError'});
     assert.equal(calls,4);
-    await assert.rejects(httpFetch(root+'/break'),/HTTP_TRANSPORT_ERROR/);assert.equal(calls,5);
+    await assert.rejects(httpFetch(root+'/break'),{message:'HTTP_TRANSPORT_ERROR_CURL_52'});assert.equal(calls,5);
   }finally{server.closeAllConnections();await new Promise(resolve=>server.close(resolve));}
+});
+
+test('a broken response retains received bytes and the libcurl cause without retrying or exposing its URL',async t=>{
+  const logs=[];t.mock.method(console,'error',value=>logs.push(JSON.parse(value)));
+  const directory=await mkdtemp(join(tmpdir(),'python-warning-'));
+  await writeFile(join(directory,'sitecustomize.py'),'import sys\nsys.stderr.write("warning: private/path?token=secret\\n")\n');
+  const priorPath=process.env.PYTHONPATH;process.env.PYTHONPATH=directory;
+  let calls=0,disconnect;
+  const server=http.createServer((req,res)=>{
+    calls++;
+    res.writeHead(200,{'content-length':'1000'});
+    res.write('preamble');disconnect=()=>res.socket.destroy();
+  });
+  await new Promise(resolve=>server.listen(0,'127.0.0.1',resolve));
+  try{
+    const response=await httpFetch(`http://127.0.0.1:${server.address().port}/private?token=secret`);
+    const reader=response.body.getReader();
+    assert.equal(new TextDecoder().decode((await reader.read()).value),'preamble');
+    disconnect();
+    await assert.rejects(reader.read(),error=>{
+      assert.equal(error.message,'HTTP_TRANSPORT_ERROR_CURL_18');
+      assert(error.transportDiagnostics.elapsedMs>=0);
+      assert.match(error.transportDiagnostics.pythonException,/^[A-Za-z_][A-Za-z0-9_]*$/);
+      assert.equal(error.transportDiagnostics.curlCode,18);
+      assert(error.transportDiagnostics.pythonElapsedMs>=0);
+      assert.equal(error.transportDiagnostics.pythonStage,'body');
+      assert.deepEqual(error.transportDiagnostics.proxyEnvironment,proxyEnvironment(process.env));
+      assert.equal(logs.length,1);assert.equal(logs[0].event,'http.transport_error');
+      assert.equal(logs[0].transportId,error.transportDiagnostics.transportId);
+      assert.equal(logs[0].pythonException,error.transportDiagnostics.pythonException);
+      assert.equal(logs[0].curlCode,18);assert(logs[0].pythonElapsedMs>=0);assert(logs[0].elapsedMs>=0);
+      assert(!JSON.stringify(logs).includes('private'));assert(!JSON.stringify(logs).includes('secret'));
+      return true;
+    });
+    assert.equal(calls,1);
+  }finally{
+    if(priorPath===undefined)delete process.env.PYTHONPATH;else process.env.PYTHONPATH=priorPath;
+    server.closeAllConnections();await new Promise(resolve=>server.close(resolve));await rm(directory,{recursive:true,force:true});
+  }
+});
+
+test('Python failures before headers retain the exception class and timing without the exception text',async t=>{
+  const logs=[];t.mock.method(console,'error',value=>logs.push(JSON.parse(value)));
+  await assert.rejects(httpFetch('http://localhost/private?token=secret',{uploadFile:{name:'private-secret',path:'/private/path'}}),error=>{
+    assert.equal(error.message,'HTTP_TRANSPORT_ERROR');assert.equal(error.transportDiagnostics.pythonException,'KeyError');
+    assert.equal(error.transportDiagnostics.pythonStage,'input');assert(error.transportDiagnostics.pythonElapsedMs>=0);
+    assert.equal(error.transportDiagnostics.curlCode,undefined);return true;
+  });
+  assert.equal(logs.length,1);assert.equal(logs[0].pythonException,'KeyError');
+  assert(!JSON.stringify(logs).includes('private'));assert(!JSON.stringify(logs).includes('secret'));
+});
+
+test('native dependency load failure retains its Python type even when the helper exits before reading stdin',async t=>{
+  const logs=[];t.mock.method(console,'error',value=>logs.push(JSON.parse(value)));
+  const directory=await mkdtemp(join(tmpdir(),'python-load-failure-'));
+  await writeFile(join(directory,'curl_cffi.py'),'raise OSError("private/path secret")\n');
+  const prior=process.env.PYTHONPATH;process.env.PYTHONPATH=directory;
+  try{
+    await assert.rejects(httpFetch('http://localhost/private?token=secret'),error=>{
+      assert.equal(error.message,'HTTP_TRANSPORT_UNAVAILABLE');assert.equal(error.transportDiagnostics.pythonException,'OSError');
+      assert.equal(error.transportDiagnostics.pythonStage,'bootstrap');assert(error.transportDiagnostics.pythonElapsedMs>=0);return true;
+    });
+    assert.equal(logs.length,1);assert(!JSON.stringify(logs).includes('private'));assert(!JSON.stringify(logs).includes('secret'));
+  }finally{
+    if(prior===undefined)delete process.env.PYTHONPATH;else process.env.PYTHONPATH=prior;
+    await rm(directory,{recursive:true,force:true});
+  }
 });
 
 test('disk multipart uploads beyond the former limit without encoding the file in the IPC request',async()=>{
@@ -64,6 +161,9 @@ test('missing HTTP helper fails explicitly and an already aborted call does not 
   try{
     await assert.rejects(httpFetch('http://localhost/'),/HTTP_TRANSPORT_UNAVAILABLE/);
     await assert.rejects(httpFetch('http://localhost/',{signal:AbortSignal.abort()}),{name:'AbortError'});
+    // A process that exits before sending metadata must retain its exit code.
+    process.env.GEMINI_HTTP_PYTHON=process.execPath;
+    await assert.rejects(httpFetch('http://localhost/'),{message:'HTTP_TRANSPORT_ERROR_EXIT_9'});
   }finally{if(prior===undefined)delete process.env.GEMINI_HTTP_PYTHON;else process.env.GEMINI_HTTP_PYTHON=prior;}
 });
 

@@ -42,12 +42,13 @@ export class WebAPI {
     const input={id,prompt,metadata,files,temporary,...(operationFlag===undefined?{}:{operationFlag})},signature=crypto.createHash('sha256').update(JSON.stringify(input)).digest('hex'),prior=this.requests.get(id);
     if(prior){if(prior.signature!==signature)throw Error('REQUEST_ID_CONFLICT');return id;}
     const state={signature,raw:'',receivedChars:0,done:false,status:null,startedAt:Date.now()};this.requests.set(id,state);
-    state.task=this.generate(input,state).catch(e=>{state.error=e.name==='TimeoutError'?'GENERATION_TIMEOUT':/^[A-Z][A-Z_0-9: ]*$/.test(e.message)?e.message:'TRANSPORT_ERROR';}).finally(()=>{state.done=true;state.elapsedMs=Date.now()-state.startedAt;});
+    state.task=this.generate(input,state).catch(e=>{state.error=e.name==='TimeoutError'?'GENERATION_TIMEOUT':/^[A-Z][A-Z_0-9: ]*$/.test(e.message)?e.message:'TRANSPORT_ERROR';state.transportDiagnostics=e.transportDiagnostics;state.proxyError=e.proxyError;state.network=e.network??state.network;}).finally(()=>{state.done=true;state.elapsedMs=Date.now()-state.startedAt;});
     return id;
   }
   async generate(input,state){
     state.stage='authentication';
     this.session=await this.auth.ensure();
+    state.network=this.auth.networkStatus;
     const body=Array(97).fill(null);
     body[0]=[input.prompt,0,null,input.files.length?input.files:null,null,null,0];body[1]=['en'];body[2]=[...input.metadata,null,null,null,null,null,null,''];
     // Sending a locally generated attestation caused generic error answers; omission is supported.
@@ -111,7 +112,7 @@ export class WebAPI {
         return await r.text();
       }catch(error){
         // History is read-only; fork/select and generation must never be replayed here.
-        if(method!=='hNvQHb'||attempt||!(error.message==='HTTP_TRANSPORT_ERROR'||error.name==='TimeoutError'))throw error;
+        if(method!=='hNvQHb'||attempt||!(/^HTTP_TRANSPORT_ERROR(?:_[A-Z0-9_]+)?$/.test(error.message)||error.name==='TimeoutError'))throw error;
       }
     }
   }

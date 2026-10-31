@@ -10,6 +10,8 @@ node_modules/
 !package-lock.json
 *cookie*.json
 *session*.json
+network.json
+network.json.*.tmp
 *.tgz
 __pycache__/
 .runtime/

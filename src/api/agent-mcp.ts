@@ -27,6 +27,8 @@ export function createAgentMcpServer(service: ApiService, { localFiles = false }
       ...(run.recoveryError ? { recovery_error: run.recoveryError } : {}),
       ...(run.partial ? { partial: { ...run.partial, complete: false } } : {}),
       ...(run.diagnostics ? { diagnostics: run.diagnostics } : {}),
+      ...(run.diagnostics?.proxyError ? { proxy_error: run.diagnostics.proxyError } : {}),
+      ...(run.diagnostics?.network?.code?.startsWith('PROXY_') ? { proxy_error: {code:run.diagnostics.network.code,attempts:run.diagnostics.network.attempts} } : {}),
       ...(['running', 'waiting_tool', 'uncertain'].includes(run.status) ? {
         next: run.temporary && run.status === 'uncertain'
           ? 'Stop polling: this temporary response cannot be recovered from upstream history. Do not resubmit or change request_id to retry; report the unknown outcome.'
@@ -38,9 +40,11 @@ export function createAgentMcpServer(service: ApiService, { localFiles = false }
   const server = new McpServer({ name: 'ask-gemini-chat', version: '0.1.0' });
   const safe = (handler: (args: any) => Promise<any>, upload = false) => async (args: any) => {
     try { return await handler(args); }
-    catch (error) {
-      const transportCode = error instanceof Error && ['NETWORK_ERROR', 'HTTP_TRANSPORT_ERROR', 'HTTP_TRANSPORT_UNAVAILABLE', 'LOGIN_REQUIRED'].includes(error.message) ? error.message : 'REQUEST_FAILED';
+    catch (error: any) {
+      const transportCode = error instanceof Error && (['NETWORK_ERROR', 'NETWORK_UNREACHABLE', 'HTTP_TRANSPORT_UNAVAILABLE', 'LOGIN_REQUIRED'].includes(error.message) || /^(?:HTTP_TRANSPORT_ERROR(?:_[A-Z0-9_]+)?|PROXY_[A-Z0-9_]+)$/.test(error.message)) ? error.message : 'REQUEST_FAILED';
       return result({ error: error instanceof ApiError ? error.code : transportCode,
+        ...(error?.proxyError ? {proxy_error:error.proxyError} : {}),
+        ...(error?.network ? {network:error.network,...(error.network.code?.startsWith('PROXY_')?{proxy_error:{code:error.network.code,attempts:error.network.attempts}}:{})} : {}),
         ...(error instanceof ApiError && ['UPLOAD_REJECTED', 'OPERATION_UNCERTAIN'].includes(error.code) ? { message: error.message } : {}),
         ...(error instanceof ApiError && error.code === 'UPLOAD_REJECTED' ? { http_status: error.status } : {}),
         next: error instanceof ApiError && error.code === 'UPLOAD_REJECTED'

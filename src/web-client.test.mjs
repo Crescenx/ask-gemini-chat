@@ -55,6 +55,12 @@ test('authentication failure and uncertain transport do not automatically resend
   api.fetch=async()=>{sent++;throw new DOMException('private timeout detail','TimeoutError');};
   await api.start({id:'c',prompt:'test'});assert.equal((await done(api,'c')).error,'GENERATION_TIMEOUT');
   await api.start({id:'c',prompt:'test'});assert.equal(sent,2);
+  const transport={proxyEnvironment:{HTTPS_PROXY:'http://127.0.0.1:4290'},noProxyConfigured:false,elapsedMs:100};
+  api.fetch=async()=>{sent++;throw Object.assign(Error('HTTP_TRANSPORT_ERROR_CURL_56'),{transportDiagnostics:transport});};
+  await api.start({id:'d',prompt:'test'});
+  const result=await done(api,'d');
+  assert.equal(result.error,'HTTP_TRANSPORT_ERROR_CURL_56');assert.deepEqual(result.transportDiagnostics,transport);
+  await api.start({id:'d',prompt:'test'});assert.equal(sent,3);
 });
 
 test('CSV and image uploads preserve their MIME type in both multipart and file descriptors',async()=>{
@@ -66,11 +72,13 @@ test('CSV and image uploads preserve their MIME type in both multipart and file 
 });
 
 test('history retries one transient read failure; mutating RPCs never retry',async()=>{
-  let calls=0;
-  const api=new WebAPI({auth,fetchImpl:async()=>{if(++calls===1)throw Error('HTTP_TRANSPORT_ERROR');return new Response('history');}});
-  assert.equal(await api.history('c_abc'),'history');assert.equal(calls,2);
-  calls=0;
-  await assert.rejects(api.rpc('KDNZr',['c_abc','r_abc']),/HTTP_TRANSPORT_ERROR/);assert.equal(calls,1);
+  for(const cause of ['HTTP_TRANSPORT_ERROR','HTTP_TRANSPORT_ERROR_CURL_56','HTTP_TRANSPORT_ERROR_EXIT_1']){
+    let calls=0;
+    const api=new WebAPI({auth,fetchImpl:async()=>{if(++calls===1)throw Error(cause);return new Response('history');}});
+    assert.equal(await api.history('c_abc'),'history');assert.equal(calls,2);
+    calls=0;
+    await assert.rejects(api.rpc('KDNZr',['c_abc','r_abc']),{message:cause});assert.equal(calls,1);
+  }
 });
 
 test('temporary mode changes only its wire flag and participates in request deduplication',async()=>{

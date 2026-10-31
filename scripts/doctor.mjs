@@ -26,9 +26,13 @@ try {
   report.transport = 'ready';
   const auth = await new SessionAuth({file: sessionFile}).status();
   report.authentication = auth.state;
+  if(auth.network)report.network=auth.network;
+  if(auth.proxy_error)report.proxy_error=auth.proxy_error;
   if (auth.code) report.authError = auth.code;
   report.ready = report.transport === 'ready' && report.authentication === 'ready';
-  report.next = report.ready ? 'Run npm run verify for a real model check before starting the configured MCP client.' : 'Run npm run auth -- login; see INSTALL.md.';
+  report.next = report.ready ? 'Run npm run verify for a real model check before starting the configured MCP client.'
+    : auth.state==='login_required' ? 'Run npm run auth -- login; see INSTALL.md.'
+    : 'Inspect network.attempts, proxy_error and authError. Repair the network/proxy and rerun doctor; preserve the saved login.';
   process.exitCode = report.ready ? 0 : 2;
 } catch (error) {
   report.error = /^[A-Z_0-9]+$/.test(error.message) ? error.message : 'DOCTOR_FAILED';

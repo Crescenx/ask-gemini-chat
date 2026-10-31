@@ -62,7 +62,7 @@ export class ApiService {
     if (old.signature !== canonical(payload)) fail('IDEMPOTENCY_CONFLICT');
     if (old.kind === 'error') throw new ApiError(old.value.code, old.value.message, old.value.status);
     if (old.kind === 'run') return this.getRun(old.id!);
-    if (old.kind === 'operation') throw new ApiError('OPERATION_UNCERTAIN', old.value?.message ?? 'The upstream operation may have completed; it will not be repeated');
+    if (old.kind === 'operation') throw Object.assign(new ApiError('OPERATION_UNCERTAIN', old.value?.message ?? 'The upstream operation may have completed; it will not be repeated'), {proxyError:old.value?.proxyError,network:old.value?.network});
     return old.value;
   }
   private remember(scope: string, key: string, payload: unknown, value: Idempotency) {
@@ -178,8 +178,9 @@ export class ApiService {
         }
         const cause = error instanceof Error && /^[A-Z][A-Z_0-9]*$/.test(error.message) ? error.message : 'UPLOAD_FAILED';
         const message = `Upload outcome is unknown (${cause})`;
-        this.remember('upload', key, payload, { kind: 'operation', signature: '', status: 'uncertain', value: { message } });
-        throw new ApiError('OPERATION_UNCERTAIN', message);
+        const details = {proxyError:(error as any)?.proxyError,network:(error as any)?.network};
+        this.remember('upload', key, payload, { kind: 'operation', signature: '', status: 'uncertain', value: { message, ...details } });
+        throw Object.assign(new ApiError('OPERATION_UNCERTAIN', message),details);
       }
     });
   }

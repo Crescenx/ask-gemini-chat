@@ -5,6 +5,7 @@ import crypto from 'node:crypto';
 import {DatabaseSync} from 'node:sqlite';
 import {setTimeout as delay} from 'node:timers/promises';
 import {httpFetch} from './http-fetch.mjs';
+import {automaticProxy} from './proxy.mjs';
 
 const APP='https://gemini.google.com/app';
 const ROTATE='https://accounts.google.com/RotateCookies';
@@ -44,7 +45,11 @@ async function atomicSave(file,value){
 }
 
 export class SessionAuth {
-  constructor({file=sessionFile,fetchImpl=httpFetch,now=Date.now}={}){this.file=file;this.fetch=fetchImpl;this.now=now;}
+  constructor({file=sessionFile,fetchImpl=httpFetch,now=Date.now,prepareNetwork=fetchImpl===httpFetch?()=>automaticProxy.refresh():async()=>undefined}={}){this.file=file;this.fetch=fetchImpl;this.now=now;this.prepareNetwork=prepareNetwork;}
+  async network(){
+    try{this.networkStatus=await this.prepareNetwork();this.networkPrepared=true;}
+    catch(error){this.networkPrepared=false;throw Object.assign(new AuthError(error.code??'NETWORK_ERROR'),{network:error.network});}
+  }
   async exclusive(operation){
     await fs.mkdir(path.dirname(this.file),{recursive:true,mode:0o700});
     const lockFile=this.file+'.lock.sqlite';
@@ -71,7 +76,7 @@ export class SessionAuth {
   async request(url,cookies,options={}){
     let response;
     try{response=await this.fetch(url,{...options,redirect:'manual',signal:AbortSignal.timeout(30000),headers:{...options.headers,cookie:Object.entries(cookies).map(([k,v])=>k+'='+v).join('; '),'referer':APP}});}
-    catch(error){throw new AuthError(error.message==='HTTP_TRANSPORT_UNAVAILABLE'?error.message:'NETWORK_ERROR');}
+    catch(error){this.networkPrepared=false;throw Object.assign(new AuthError(error.message==='HTTP_TRANSPORT_UNAVAILABLE'||error.message.startsWith('PROXY_')?error.message:'NETWORK_ERROR'),{proxyError:error.proxyError,network:error.network,transportDiagnostics:error.transportDiagnostics});}
     for(const line of response.headers.getSetCookie()){
       const [pair,...attrs]=line.split(';'),index=pair.indexOf('='),name=pair.slice(0,index),value=pair.slice(index+1);
       if(!allowed.has(name))continue;
@@ -97,7 +102,7 @@ export class SessionAuth {
       let stored;try{stored=await this.load();}catch(e){if(e.code!=='LOGIN_REQUIRED')throw e;}
       // An unchanged browser snapshot must not overwrite cookies rotated by HTTP.
       if(stored?.browserFingerprint===fingerprint&&stored.state==='ready'){
-        try{await this._ensure(false);return {state:'ready'};}
+        try{await this._ensure(false,true);return {state:'ready'};}
         catch(e){if(e.code!=='LOGIN_REQUIRED')throw e;}
       }
       await this._import(cookies,fingerprint);
@@ -107,6 +112,7 @@ export class SessionAuth {
   async _import(value,browserFingerprint){
     let previous;try{previous=await this.load();}catch(e){if(e.code!=='LOGIN_REQUIRED')throw e;}
     const cookies=importCookies(value);let session,rotated=false;
+    await this.network();
     try{session=await this.validate(cookies);}catch(e){
       if(e.code!=='LOGIN_REQUIRED')throw e;
       await this.rotate(cookies);rotated=true;session=await this.validate(cookies);
@@ -115,15 +121,20 @@ export class SessionAuth {
     await atomicSave(this.file,{version:1,account:session.account,cookies,validatedAt:this.now(),refreshedAt:rotated?this.now():0,state:'ready',...(browserFingerprint?{browserFingerprint}:{})});
     return {state:'ready',account:session.account};
   }
-  async ensure({refresh=false}={}){
+  async ensure({refresh=false,detectProxy=false}={}){
     // Sharing this promise also prevents concurrent rotations within one client.
-    if(this.pending)return this.pending;
-    this.pending=this.exclusive(()=>this._ensure(refresh));
+    if(this.pending){
+      if(detectProxy&&!this.pendingDetectProxy){await this.pending.catch(()=>{});return this.ensure({refresh,detectProxy});}
+      return this.pending;
+    }
+    this.pendingDetectProxy=detectProxy||!this.networkPrepared;
+    this.pending=this.exclusive(()=>this._ensure(refresh,detectProxy));
     try{return await this.pending;}finally{this.pending=null;}
   }
-  async _ensure(refresh){
+  async _ensure(refresh,detectProxy=false){
     const stored=await this.load();
     if(!stored.cookies?.['__Secure-1PSID'])throw new AuthError('LOGIN_REQUIRED');
+    if(detectProxy||!this.networkPrepared)await this.network();
     const cookies=importCookies(stored.cookies);
     let rotated=false;
     try{
@@ -143,7 +154,7 @@ export class SessionAuth {
     }
   }
   async status(){
-    try{const session=await this.ensure();return {state:'ready',account:session.account};}
-    catch(e){if(e instanceof AuthError)return {state:e.code==='LOGIN_REQUIRED'?'login_required':'error',code:e.code};throw e;}
+    try{const session=await this.ensure({detectProxy:true});return {state:'ready',account:session.account,...(this.networkStatus?{network:this.networkStatus}:{})};}
+    catch(e){if(e instanceof AuthError)return {state:e.code==='LOGIN_REQUIRED'?'login_required':'error',code:e.code,...(e.network?{network:e.network}:{}),...(e.proxyError?{proxy_error:e.proxyError}:{})};throw e;}
   }
 }
